@@ -107,8 +107,12 @@ scp -r facility-node pi@192.168.10.104:~
 ```bash
 # on the Pi
 sudo apt install -y git
-git clone <repo-url> ~/bhumijo && ln -s ~/bhumijo/facility-node ~/facility-node
+git clone https://github.com/utpaulBS23/bhumijo-gateway-linux.git ~/bhumijo && ln -s ~/bhumijo/facility-node ~/facility-node
 ```
+
+The repo is public, so the Pi needs **no GitHub key** to clone or `git pull` over HTTPS. Developers who push use SSH: `git@github.com:utpaulBS23/bhumijo-gateway-linux.git`.
+
+> Never put site secrets in the repo. They belong only in `/opt/facility-node/.env` on each Pi (and `board_secrets.py` on the relay board). Both are git-ignored.
 
 With a git checkout:
 - **Updating is automatic:** after the bootstrap in step 6, every `git pull` reinstalls and restarts the node.

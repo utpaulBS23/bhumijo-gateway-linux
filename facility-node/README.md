@@ -99,7 +99,7 @@ facility doctor      # everything ✓
 **From a git clone (recommended):**
 
 ```bash
-git clone <repo-url> ~/bhumijo && cd ~/bhumijo
+git clone https://github.com/utpaulBS23/bhumijo-gateway-linux.git ~/bhumijo && cd ~/bhumijo
 sudo bash facility-node/deploy/bootstrap.sh   # install + auto-reinstall on every git pull
 facility config && facility doctor
 ```
