@@ -1,0 +1,8 @@
+flask==2.3.3
+requests==2.31.0
+smbus2==0.4.3
+# qr_tool.py: pure-Python QR + PNG, no Pillow needed
+qrcode==7.4.2
+pypng==0.20220715.0
+# gpiozero + lgpio come from apt (python3-gpiozero python3-lgpio): the Pi 5
+# GPIO needs lgpio, and RPi.GPIO does not work on the Pi 5.

@@ -1,0 +1,26 @@
+[Unit]
+Description=Facility node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=facility
+Group=facility
+SupplementaryGroups=gpio i2c
+WorkingDirectory=/opt/facility-node
+EnvironmentFile=/opt/facility-node/.env
+Environment=GPIOZERO_PIN_FACTORY=lgpio
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/facility-node/venv/bin/python app.py
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/facility
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,24 @@
+#!/bin/bash
+# Shared by post-merge / post-rewrite: reinstall the facility node after a pull
+# if anything under facility-node/ changed. Enabled by deploy/bootstrap.sh.
+set -u
+ROOT="$(git rev-parse --show-toplevel)"
+NODE="$ROOT/facility-node"
+OLD="${1:-ORIG_HEAD}"
+
+# Only on the Pi, and only once the node has been installed there
+[ -d "${FACILITY_DEST:-/opt/facility-node}" ] || exit 0
+[ "${FACILITY_SKIP_AUTO_INSTALL:-0}" = 1 ] && { echo "facility: auto-install skipped"; exit 0; }
+
+if ! git diff --quiet "$OLD" HEAD -- facility-node/ 2>/dev/null; then
+    echo
+    echo "facility: facility-node/ changed in this pull -> reinstalling"
+    if sudo -n true 2>/dev/null || [ -t 0 ]; then
+        sudo bash "$NODE/deploy/install.sh" || echo "facility: install FAILED - run: sudo bash $NODE/deploy/install.sh"
+    else
+        echo "facility: needs sudo; run: sudo bash $NODE/deploy/install.sh"
+    fi
+else
+    echo "facility: no node changes in this pull"
+fi
+exit 0   # never fail the pull itself
