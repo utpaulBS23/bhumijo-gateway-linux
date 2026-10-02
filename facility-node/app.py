@@ -76,7 +76,7 @@ class FailureLimiter:
             q.append(now)
 
 
-def create_app(settings, doors, store, uplink, camera=None, limiter=None):
+def create_app(settings, doors, store, uplink, camera=None, limiter=None, odour=None):
     """doors: list of DoorController, one per section."""
     app = Flask(__name__)
     limiter = limiter or FailureLimiter()
@@ -183,6 +183,7 @@ def create_app(settings, doors, store, uplink, camera=None, limiter=None):
                             "scanners": list(d.door.scanner_ips)} for d in doors},
             reed=settings.reed,
             camera=camera.snapshot_status() if camera else None,
+            odour=odour.state() if odour else None,
         )
 
     return app
@@ -195,7 +196,9 @@ def main():
     from door import DoorController
     from inputs import ReedSwitch, run_door_ticker, run_exit_poller
     from relay import Relay
-    from sensors_camera import Camera, Sensors, run_sensor_loop
+    from mq import MQSensors
+    from odour import OdourMonitor
+    from sensors_camera import Camera, Sensors, make_snapshotter, run_sensor_loop
     from store import Store
     from uplink import Uplink
 
@@ -208,8 +211,11 @@ def main():
     relay = Relay(s.relay_url, s.relay_pwd)
     uplink = Uplink(s, store)
     camera = Camera(s)
-    doors = [DoorController(s, spec, store, relay, uplink, snapshot=camera.snapshot)
+    snapshot = make_snapshotter(camera, uplink)
+    doors = [DoorController(s, spec, store, relay, uplink, snapshot=snapshot)
              for spec in s.doors]
+    odour = OdourMonitor(s, uplink)
+    mq = MQSensors(s) if s.mq else None
 
     stop = threading.Event()
     jobs = [
@@ -217,7 +223,7 @@ def main():
         lambda: uplink.run_flush_loop(stop),
         lambda: run_exit_poller(s, relay, doors, stop),
         lambda: run_door_ticker(doors, stop),
-        lambda: run_sensor_loop(s, Sensors(), camera, uplink, stop),
+        lambda: run_sensor_loop(s, Sensors(), camera, uplink, stop, mq=mq, odour=odour),
         lambda: camera.run_probe_loop(stop),
         lambda: camera.run_frame_loop(stop),
     ]
@@ -230,9 +236,12 @@ def main():
     for d in s.doors:
         log.info("door %s: relay %d, exit input %s, reed GPIO %s, scanners %s",
                  d.name, d.relay, d.exit_input, d.reed_gpio, ", ".join(d.scanner_ips) or "any")
+    log.info("odour limits %s; MQ sensors %s; snapshot upload %s", odour.limits or "off",
+             "on" if mq else "off", s.snapshot_upload_path or "off")
     log.info("facility node %s listening on %s:%d", s.facility_id, s.host, s.port)
     try:
-        create_app(s, doors, store, uplink, camera).run(host=s.host, port=s.port, threaded=True)
+        create_app(s, doors, store, uplink, camera, odour=odour).run(
+            host=s.host, port=s.port, threaded=True)
     finally:
         stop.set()
         for reed in reeds:

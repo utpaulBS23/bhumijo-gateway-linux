@@ -46,6 +46,13 @@ def _float(name, default):
     return float(_env(name, default))
 
 
+def _optional_float(name):
+    value = _env(name)
+    if value is None or value.lower() == "none":
+        return None
+    return float(value)
+
+
 @dataclass(frozen=True)
 class DoorSpec:
     """One physical door: its relay channel, exit input, reed pin and scanners."""
@@ -147,6 +154,8 @@ class Settings:
     cam_port: int
     cam_rtsp: str
     snapshot_dir: str
+    snapshot_upload_path: str  # PENDING backend: multipart upload endpoint; "" = off
+    snapshot_keep_days: int
 
     # Local store
     db_path: str
@@ -158,6 +167,26 @@ class Settings:
     propped_threshold: int
     propped_repeat: int
     classify_window: float     # seconds a trigger "owns" a following door-open
+
+    # Odour alert: limits (None = metric off) and timing in seconds
+    odour_tvoc_limit: Optional[float]
+    odour_aqi_limit: Optional[float]
+    odour_nh3_limit: Optional[float]
+    odour_h2s_limit: Optional[float]
+    odour_hold: int
+    odour_repeat: int
+    odour_clear_hold: int
+
+    # MQ-135 / MQ-136 through ADS1115
+    mq: bool
+    ads1115_addr: int
+    mq135_channel: Optional[int]
+    mq136_channel: Optional[int]
+    mq135_r0: Optional[float]
+    mq136_r0: Optional[float]
+    mq_vc: float
+    mq_rl_kohm: float
+    mq_divider: float
 
     # Job intervals (seconds)
     sensor_interval: int
@@ -191,6 +220,8 @@ class Settings:
             cam_port=_int("CAM_PORT", 554),
             cam_rtsp=_env("CAM_RTSP", ""),
             snapshot_dir=_env("SNAPSHOT_DIR", "/var/lib/facility/snapshots"),
+            snapshot_upload_path=_env("SNAPSHOT_UPLOAD_PATH", ""),
+            snapshot_keep_days=_int("SNAPSHOT_KEEP_DAYS", 7),
             db_path=_env("DB_PATH", "/var/lib/facility/facility.db"),
             max_queue=_int("MAX_QUEUE", 200000),
             reed=_bool("REED", False),
@@ -198,6 +229,22 @@ class Settings:
             propped_threshold=_int("PROPPED_THRESHOLD", 300),
             propped_repeat=_int("PROPPED_REPEAT", 180),
             classify_window=_float("CLASSIFY_WINDOW", 15),
+            odour_tvoc_limit=_optional_float("ODOUR_TVOC_LIMIT"),
+            odour_aqi_limit=_optional_float("ODOUR_AQI_LIMIT"),
+            odour_nh3_limit=_optional_float("ODOUR_NH3_LIMIT"),
+            odour_h2s_limit=_optional_float("ODOUR_H2S_LIMIT"),
+            odour_hold=_int("ODOUR_HOLD", 600),
+            odour_repeat=_int("ODOUR_REPEAT", 1800),
+            odour_clear_hold=_int("ODOUR_CLEAR_HOLD", 300),
+            mq=_bool("MQ", False),
+            ads1115_addr=int(_env("ADS1115_ADDR", "0x48"), 0),
+            mq135_channel=_optional_int("MQ135_CHANNEL") if _env("MQ135_CHANNEL") else 0,
+            mq136_channel=_optional_int("MQ136_CHANNEL") if _env("MQ136_CHANNEL") else 1,
+            mq135_r0=_optional_float("MQ135_R0"),
+            mq136_r0=_optional_float("MQ136_R0"),
+            mq_vc=_float("MQ_VC", 5.0),
+            mq_rl_kohm=_float("MQ_RL_KOHM", 10.0),
+            mq_divider=_float("MQ_DIVIDER", 1.5),
             sensor_interval=_int("SENSOR_INTERVAL", 60),
             pull_interval=_int("PULL_INTERVAL", 300),
             flush_interval=_int("FLUSH_INTERVAL", 15),

@@ -1,4 +1,4 @@
-"""ENS160 + AHT20 over I2C, and IP-camera health/snapshots.
+"""ENS160 + AHT20 (+ optional MQ gas sensors) over I2C, and IP-camera health/snapshots.
 
 Sensor reads use smbus2 (I2C bus 1). Camera checks shell out to ffmpeg with
 hard timeouts so a hung RTSP stream can never stall the node.
@@ -198,6 +198,19 @@ class Camera:
             return None
         return name
 
+    def prune_snapshots(self, now=None):
+        """Delete snapshots older than SNAPSHOT_KEEP_DAYS (SD card space)."""
+        if not os.path.isdir(self.s.snapshot_dir):
+            return 0
+        cutoff = (now or time.time()) - self.s.snapshot_keep_days * 86400
+        removed = 0
+        for name in os.listdir(self.s.snapshot_dir):
+            path = os.path.join(self.s.snapshot_dir, name)
+            if name.endswith(".jpg") and os.path.getmtime(path) < cutoff:
+                os.remove(path)
+                removed += 1
+        return removed
+
     def run_probe_loop(self, stop):
         while not stop.is_set():
             self.probe()
@@ -206,12 +219,28 @@ class Camera:
     def run_frame_loop(self, stop):
         while not stop.is_set():
             self.frame_check()
+            self.prune_snapshots()
             stop.wait(self.s.cam_frame_interval)
 
 
-def run_sensor_loop(settings, sensors, camera, uplink, stop):
+def make_snapshotter(camera, uplink):
+    """snapshot() for the doors: take a JPEG, queue its upload, return its name."""
+    def snapshot():
+        name = camera.snapshot()
+        if name:
+            uplink.queue_snapshot(name, os.path.join(camera.s.snapshot_dir, name),
+                                  datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+        return name
+    return snapshot
+
+
+def run_sensor_loop(settings, sensors, camera, uplink, stop, mq=None, odour=None):
     while not stop.is_set():
         reading = sensors.read()
+        if mq is not None:
+            reading.update(mq.read())
+        if odour is not None:
+            odour.update(reading)
         payload = {"facility": settings.facility_id,
                    "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                    **reading,

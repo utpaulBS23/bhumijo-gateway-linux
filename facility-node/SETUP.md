@@ -41,6 +41,12 @@ Follow the steps in order. Each step ends with a check, so stop there if the che
 - [ ] Dual-pole (DPDT) exit button
 - [ ] MC-38 reed switch (optional; needed for forced-open and propped-open alerts)
 
+**Optional: ammonia / H2S sensing**
+
+- [ ] ADS1115 ADC module
+- [ ] MQ-135 (ammonia) and/or MQ-136 (H2S) module
+- [ ] Resistors for each MQ output: 10 kΩ + 20 kΩ (voltage divider)
+
 **Information to collect first**
 
 | Item | From |
@@ -92,6 +98,21 @@ In the router admin page (usually `http://192.168.10.100`):
 | **Male** reed, wire B | 14 | GND |
 | **Female** reed, wire A | 15 | **GPIO22** |
 | **Female** reed, wire B | 20 | GND |
+
+**Optional ADS1115 + MQ sensors** (on the same I2C bus as the ENS160/AHT20):
+
+| Signal | Connect to |
+|---|---|
+| ADS1115 VDD | Pi **3.3V** (pin 1/17). **Not** 5V: the Pi's I2C runs at 3.3V |
+| ADS1115 GND, ADDR | GND (ADDR to GND = address 0x48) |
+| ADS1115 SDA / SCL | Pi pin 3 / pin 5 (shared with the other sensors) |
+| MQ-135 / MQ-136 VCC | Pi **5V** (pin 2/4). The heater needs 5V, about 150 mA each |
+| MQ GND | GND |
+| MQ-135 AOUT | **10 kΩ** → ADS1115 **A0**, and **20 kΩ** from A0 to GND |
+| MQ-136 AOUT | **10 kΩ** → ADS1115 **A1**, and **20 kΩ** from A1 to GND |
+
+The divider scales the MQ's 0–5V output to 0–3.33V, which is safe for the ADS1115. Without it, readings clip and the ADC can be damaged.
+Mount the MQ sensors high on the wall in the toilet area, away from the air vents and the door.
 
 The reed switches go directly to the GPIO pins. No resistor is needed (the code enables the internal pull-up), and no optocoupler.
 Mount each reed on the door's opening edge, **at least 10 cm from the mag lock**.
@@ -259,7 +280,7 @@ REED=1          # 0 if the reed switches aren't fitted yet
 ```bash
 cd /opt/facility-node
 sudo -u facility ./venv/bin/python test_door.py      # last line: OK
-sudo i2cdetect -y 1                                   # shows 38 and 53
+sudo i2cdetect -y 1                                   # shows 38 and 53 (+ 48 if ADS1115 fitted)
 sudo systemctl start facility-node
 journalctl -u facility-node -f
 ```
@@ -351,6 +372,76 @@ qr create --label test --hours 24 --token <token>
 
 ---
 
+## 8b. Odour sensors and alert
+
+### What's measured
+
+| Sensor | Values | Notes |
+|---|---|---|
+| ENS160 | `tvoc` (ppb), `eco2` (ppm), `aqi` (1–5) | General gases. A good *trend* signal, but not specific to toilet smells |
+| AHT20 | `temperature`, `humidity` | Also used to correct the ENS160's readings |
+| MQ-135 (optional) | `nh3_ppm` | Ammonia, the main urine smell |
+| MQ-136 (optional) | `h2s_ppm` | Hydrogen sulphide, the "rotten egg" smell |
+
+### Warm-up
+
+- **ENS160:** 24–48 h burn-in when new, then about 3 min after each boot. It sends `null` until it's ready.
+- **MQ sensors:** 24–48 h burn-in when new, then about 5 min of heater warm-up after each boot.
+
+### Calibrate the MQ sensors (once, after burn-in)
+
+1. Set `MQ=1` in `.env` and restart the service.
+2. Air the room out: door open, no people, no cleaning products for 30 min.
+3. Run:
+
+```bash
+cd /opt/facility-node
+sudo -u facility ./venv/bin/python mq.py read          # Rs should be steady, not "no signal"
+sudo -u facility ./venv/bin/python mq.py calibrate     # samples for 3 min
+```
+
+4. Paste the printed `MQ135_R0=` / `MQ136_R0=` lines into `.env`, then run `sudo systemctl restart facility-node`.
+
+Until R0 is set, `nh3_ppm` and `h2s_ppm` stay `null`. Check `MQ_RL_KOHM` against the small resistor on the MQ board: `103` = 10 kΩ, `102` = 1 kΩ.
+
+### Odour alert
+
+| `.env` | Default | Meaning |
+|---|---|---|
+| `ODOUR_TVOC_LIMIT` | 1500 | ppb; empty = off |
+| `ODOUR_AQI_LIMIT` | 4 | 1–5; empty = off |
+| `ODOUR_NH3_LIMIT` | 10 | ppm; empty = off |
+| `ODOUR_H2S_LIMIT` | 1 | ppm; empty = off |
+| `ODOUR_HOLD` | 600 | Seconds above a limit before `odour_high` |
+| `ODOUR_REPEAT` | 1800 | Repeat `odour_high` (`repeat:true`) while still high |
+| `ODOUR_CLEAR_HOLD` | 300 | Seconds below every limit before `odour_resolved` |
+
+**Tune the limits per site over the first week:**
+1. Note the time whenever a cleaner reports the toilet "needs cleaning".
+2. Compare against the readings in the admin panel.
+3. Set each limit just below the values seen at those times.
+
+The defaults are only starting points.
+
+✅ **Check:** `curl -s http://192.168.10.104:5454/health` → `odour.limits` lists the metrics you turned on.
+
+---
+
+## 8c. Camera snapshots
+
+- **When:** a snapshot is taken on `forced_open` and on the first `propped_open` alert.
+- **Where:** saved to `/var/lib/facility/snapshots/` and deleted after `SNAPSHOT_KEEP_DAYS` (default 7).
+- **Upload:** set `SNAPSHOT_UPLOAD_PATH` in `.env` once the backend has an upload endpoint. The Pi sends a multipart POST with field `file` and form fields `facility`, `name`, `ts`, using the same auth header as the other APIs.
+- **Matching:** the upload is queued **before** its alert, so the image arrives first. The alert's `snapshot` field is the file name.
+
+Copy snapshots off by hand:
+
+```bash
+scp pi@192.168.10.104:/var/lib/facility/snapshots/*.jpg .
+```
+
+---
+
 ## 9. Facility app (attendant phones)
 
 In the app's settings:
@@ -424,6 +515,12 @@ Then **revoke the test codes**: `qr revoke --label test`.
 | Wrong door logs the exit | `DOOR_*_EXIT_INPUT` swapped |
 | False `forced_open` alerts | Reed too close to the mag lock, or polarity: set `REED_ACTIVE_HIGH=1` |
 | Sensors `null` | I2C off or wiring: `sudo i2cdetect -y 1` should show 38 and 53. ENS160 needs ~3 min warm-up after boot and 24–48 h burn-in when new |
+| `nh3_ppm` / `h2s_ppm` always `null` | `MQ=0`, R0 not set (run `mq.py calibrate`), or no `48` in `i2cdetect` |
+| MQ `Rs` "no signal" | AOUT not reaching the ADS1115 channel, or the divider is wired backwards |
+| ppm wildly high | `MQ_RL_KOHM` wrong for your board, or calibrated in dirty air: recalibrate |
+| Odour alert never fires | Limits too high, or the metric's limit is empty; check `/health` → `odour.limits` |
+| Odour alert fires constantly | Limits too low for this site; raise them after a week of data |
+| Snapshots not reaching admin | `SNAPSHOT_UPLOAD_PATH` empty, or the backend rejects the upload (look for `snapshot` in `journalctl`) |
 | Camera `reachable:false` | Wrong `CAM_HOST`; test the RTSP URL in VLC |
 | Facility app 400 `unknown_door` | The app isn't sending `door` |
 | Facility app 429 | Too many wrong Auth Codes; wait a minute and check the code |

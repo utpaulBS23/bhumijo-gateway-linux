@@ -106,13 +106,18 @@ class FakeSession:
     def __init__(self):
         self.online = True
         self.posts = []
+        self.uploads = []
         self.post_status = 200
         self.get_resp = FakeResp(200, {"tokens": [], "facilityId": "facility-001"})
         self.get_calls = []
 
-    def post(self, url, json=None, headers=None, timeout=None):
+    def post(self, url, json=None, headers=None, timeout=None, files=None, data=None):
         if not self.online:
             raise requests.ConnectionError("offline")
+        if files is not None:
+            name, fh, ctype = files["file"]
+            self.uploads.append((url, name, fh.read(), ctype, data, headers))
+            return FakeResp(self.post_status)
         self.posts.append((url, json, headers))
         return FakeResp(self.post_status)
 
@@ -666,6 +671,202 @@ class DoorConfigTests(unittest.TestCase):
     def test_single_door_fallback(self):
         s = settings()
         self.assertEqual(s.doors, (MAIN,))
+
+
+class OdourTests(unittest.TestCase):
+    def setUp(self):
+        from odour import OdourMonitor
+        self.s = settings(odour_tvoc_limit=1000, odour_aqi_limit=4, odour_nh3_limit=10,
+                          odour_hold=600, odour_repeat=1800, odour_clear_hold=300)
+        self.up, self.clock = FakeUplink(), Clock()
+        self.m = OdourMonitor(self.s, self.up, clock=self.clock)
+
+    def feed(self, minutes, **reading):
+        for _ in range(minutes):
+            self.m.update(dict(dict(tvoc=200, aqi=2, nh3_ppm=1), **reading))
+            self.clock.advance(60)
+
+    def alerts(self):
+        return [(a["subtype"], a.get("repeat")) for a in self.up.of("alert")]
+
+    def test_alert_after_hold_then_repeat_then_resolve(self):
+        self.feed(10, tvoc=1500)                  # t=0..540: not yet 600 s
+        self.assertEqual(self.alerts(), [])
+        self.feed(1, tvoc=1500)                   # t=600 -> first alert
+        self.assertEqual(self.alerts(), [("odour_high", False)])
+        a = self.up.of("alert")[0]
+        self.assertEqual((a["metrics"], a["readings"]["tvoc"], a["duration_s"]),
+                         (["tvoc"], 1500, 600))
+        self.feed(30, tvoc=1500)                  # t=2400 -> repeat
+        self.assertEqual(self.alerts()[-1], ("odour_high", True))
+        self.feed(5)                              # low 0..240 s: not cleared yet
+        self.assertNotIn("odour_resolved", [x[0] for x in self.alerts()])
+        self.feed(1)                              # low for 300 s -> resolved
+        self.assertEqual(self.alerts()[-1], ("odour_resolved", None))
+        self.assertFalse(self.m.alerting)
+
+    def test_brief_spike_does_not_alert(self):
+        self.feed(5, aqi=5)
+        self.feed(1)
+        self.feed(6, aqi=5)
+        self.assertEqual(self.alerts(), [])
+
+    def test_short_dip_while_alerting_does_not_resolve(self):
+        self.feed(11, nh3_ppm=20)
+        self.feed(2)                              # 2 min dip < clear hold
+        self.feed(3, nh3_ppm=20)
+        self.feed(4)
+        self.assertEqual(self.alerts(), [("odour_high", False)])
+
+    def test_missing_readings_hold_state(self):
+        self.feed(11, tvoc=1500)
+        for _ in range(20):                       # sensor warming up / failed
+            self.m.update(dict(tvoc=None, aqi=None, nh3_ppm=None))
+            self.clock.advance(60)
+        self.assertTrue(self.m.alerting)
+        self.assertEqual(self.alerts(), [("odour_high", False)])
+
+    def test_disabled_metric_ignored(self):
+        from odour import OdourMonitor
+        m = OdourMonitor(replace(self.s, odour_tvoc_limit=None), self.up, clock=self.clock)
+        for _ in range(20):
+            m.update(dict(tvoc=99999, aqi=1, nh3_ppm=0))
+            self.clock.advance(60)
+        self.assertEqual(self.up.of("alert"), [])
+
+    def test_no_limits_no_alerts(self):
+        from odour import OdourMonitor
+        s = replace(self.s, odour_tvoc_limit=None, odour_aqi_limit=None, odour_nh3_limit=None)
+        m = OdourMonitor(s, self.up, clock=self.clock)
+        m.update(dict(tvoc=99999, aqi=5))
+        self.assertEqual(m.limits, {})
+
+
+class MQTests(unittest.TestCase):
+    def test_ads1115_config_bits(self):
+        from mq import ads1115_config
+        self.assertEqual(ads1115_config(0), 0xC383)
+        self.assertEqual(ads1115_config(1), 0xD383)
+        with self.assertRaises(ValueError):
+            ads1115_config(4)
+
+    def test_ads1115_volts(self):
+        from mq import ads1115_volts
+        self.assertAlmostEqual(ads1115_volts(0x40, 0x00), 2.048)
+        self.assertAlmostEqual(ads1115_volts(0xFF, 0xFF), -0.000125)
+
+    def test_rs_and_ppm(self):
+        from mq import mq_ppm, mq_rs
+        self.assertAlmostEqual(mq_rs(2.5, 5.0, 10), 10.0)
+        self.assertIsNone(mq_rs(0, 5.0, 10))
+        self.assertAlmostEqual(mq_ppm(10, 10, "mq135_nh3"), 102.2)
+        self.assertIsNone(mq_ppm(10, None, "mq135_nh3"))
+        # Lower Rs (more gas) -> more ppm
+        self.assertGreater(mq_ppm(5, 10, "mq136_h2s"), mq_ppm(8, 10, "mq136_h2s"))
+
+    class FakeADC:
+        def __init__(self, volts):
+            self.v = volts
+
+        def volts(self, ch):
+            return self.v[ch]
+
+    def test_reader_applies_divider_and_r0(self):
+        from mq import MQSensors, mq_ppm
+        s = settings(mq135_r0=10.0, mq136_r0=None)
+        # ADS sees 1.6667 V -> sensor 2.5 V after x1.5 divider -> Rs = 10 kOhm
+        mq = MQSensors(s, adc=self.FakeADC({0: 2.5 / 1.5, 1: 1.0}), samples=3)
+        out = mq.read()
+        self.assertAlmostEqual(out["nh3_ppm"], round(mq_ppm(10, 10, "mq135_nh3"), 2))
+        self.assertIsNone(out["h2s_ppm"], "no R0 -> null ppm")
+
+    def test_reader_failure_returns_nulls(self):
+        from mq import MQSensors
+
+        class Broken:
+            def volts(self, ch):
+                raise OSError("i2c")
+
+        mq = MQSensors(settings(mq135_r0=10.0, mq136_r0=10.0), adc=Broken())
+        mq.adc = Broken()
+        self.assertEqual(mq.read(), {"nh3_ppm": None, "h2s_ppm": None})
+
+    def test_calibrate_divides_by_clean_air_ratio(self):
+        from mq import calibrate
+        adc = self.FakeADC({0: 2.5 / 1.5, 1: 2.5 / 1.5})   # Rs = 10 kOhm on both
+        r0 = calibrate({"MQ135_CLEAN_RATIO": "3.6", "MQ136_CLEAN_RATIO": "2.0"},
+                       seconds=0, adc=adc)
+        self.assertEqual(r0, {"MQ135_R0": round(10 / 3.6, 3), "MQ136_R0": 5.0})
+
+    def test_channel_none_skips_sensor(self):
+        from mq import MQSensors
+        mq = MQSensors(settings(env={"MQ136_CHANNEL": "none"}), adc=self.FakeADC({0: 1.0}))
+        self.assertEqual(list(mq.read()), ["nh3_ppm"])
+
+
+class SnapshotUploadTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.s = settings(snapshot_upload_path="/facility/snapshot", snapshot_dir=self.tmp.name)
+        self.store = Store(":memory:")
+        self.http = FakeSession()
+        self.uplink = Uplink(self.s, self.store, session=self.http)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def jpeg(self, name="a.jpg", data=b"\xff\xd8jpeg"):
+        path = os.path.join(self.tmp.name, name)
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+
+    def test_snapshot_uploaded_before_its_alert(self):
+        from sensors_camera import make_snapshotter
+        self.jpeg("snap1.jpg")
+
+        class Cam:
+            s = self.s
+
+            def snapshot(self):
+                return "snap1.jpg"
+
+        door = DoorController(self.s, MAIN, self.store, FakeRelay(), self.uplink,
+                              snapshot=make_snapshotter(Cam(), self.uplink), spawn=lambda fn: fn())
+        door.door_opened()   # forced_open -> snapshot + alert
+        self.assertEqual(self.uplink.flush(), 2)
+        url, name, data, ctype, form, headers = self.http.uploads[0]
+        self.assertTrue(url.endswith("/facility/snapshot"))
+        self.assertEqual((name, data, ctype), ("snap1.jpg", b"\xff\xd8jpeg", "image/jpeg"))
+        self.assertEqual(form["name"], "snap1.jpg")
+        self.assertEqual(headers, {"Authorization": "Bearer admin-secret"})
+        self.assertEqual(self.http.posts[0][1]["snapshot"], "snap1.jpg")
+
+    def test_upload_retries_while_offline(self):
+        self.uplink.queue_snapshot("a.jpg", self.jpeg(), "t")
+        self.http.online = False
+        self.assertEqual(self.uplink.flush(), 0)
+        self.http.online = True
+        self.assertEqual(self.uplink.flush(), 1)
+
+    def test_missing_file_skipped(self):
+        self.uplink.queue_snapshot("gone.jpg", os.path.join(self.tmp.name, "gone.jpg"), "t")
+        self.uplink.enqueue("sensor", {"x": 1})
+        self.assertEqual(self.uplink.flush(), 1)
+        self.assertEqual(self.store.queue_size(), 0)
+
+    def test_disabled_by_default(self):
+        up = Uplink(settings(), self.store, session=self.http)
+        up.queue_snapshot("a.jpg", self.jpeg(), "t")
+        self.assertEqual(self.store.queue_size(), 0)
+
+    def test_prune_old_snapshots(self):
+        from sensors_camera import Camera
+        old, new = self.jpeg("old.jpg"), self.jpeg("new.jpg")
+        os.utime(old, (0, 0))
+        cam = Camera(replace(self.s, snapshot_keep_days=7))
+        self.assertEqual(cam.prune_snapshots(), 1)
+        self.assertEqual(os.listdir(self.tmp.name), ["new.jpg"])
 
 
 class MiscTests(unittest.TestCase):

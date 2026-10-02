@@ -50,7 +50,9 @@ sudo nmcli con mod "Wired connection 1" ipv4.method manual \
 | `relay.py` | KC868-A4S: `sw_ctl.cgi` fire, `input_ctl.cgi` inputs |
 | `door.py` | Per-door unlock decisions + open classification + propped/forced alerts |
 | `uplink.py` | 4 admin APIs: push sensor / door-event / alert, pull tokens |
-| `sensors_camera.py` | ENS160 + AHT20 (smbus2), camera probe / frame check / snapshot |
+| `sensors_camera.py` | ENS160 + AHT20 (smbus2), camera probe / frame check / snapshot + retention |
+| `odour.py` | Odour alert: `odour_high` (+repeats) → `odour_resolved` |
+| `mq.py` | MQ-135 (NH3) / MQ-136 (H2S) via ADS1115, plus `calibrate` / `read` CLI |
 | `inputs.py` | MC-38 reed (gpiozero + lgpio), exit-button poller |
 | `app.py` | Flask endpoints + background jobs |
 | `qr_tool.py` | Create / list / revoke unlock QR codes on the Pi |
@@ -84,6 +86,15 @@ sudo -u facility ./venv/bin/python qr_tool.py create --label test
 sudo -u facility ./venv/bin/python qr_tool.py list
 sudo -u facility ./venv/bin/python qr_tool.py revoke --label test
 ```
+
+## Odour, gas sensors, camera
+
+| Feature | Behaviour |
+|---|---|
+| Readings (every 60 s) | `tvoc`, `eco2`, `aqi`, `temperature`, `humidity`, plus `nh3_ppm` and `h2s_ppm` when `MQ=1`. `null` while warming up or after a failure |
+| Odour alert | Any metric ≥ its limit for `ODOUR_HOLD` → `odour_high` (`repeat:false`), then every `ODOUR_REPEAT` (`repeat:true`); below all limits for `ODOUR_CLEAR_HOLD` → `odour_resolved`. Alert payload includes `metrics` (which limits tripped) and `readings` |
+| Camera health | TCP probe every 30 s, frozen-frame check every 5 min; piggybacks the sensor push as `camera` |
+| Snapshots | On `forced_open` and the first `propped_open`. Uploaded (multipart) **before** its alert when `SNAPSHOT_UPLOAD_PATH` is set; alert's `snapshot` = file name. Kept `SNAPSHOT_KEEP_DAYS` on the Pi |
 
 ## Facility-app auth
 

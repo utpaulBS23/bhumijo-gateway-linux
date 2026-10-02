@@ -40,6 +40,7 @@ class Uplink:
             "sensor": settings.sensor_path,
             "door_event": settings.door_event_path,
             "alert": settings.alert_path,
+            "snapshot": settings.snapshot_upload_path,
         }
         self._wake = threading.Event()
         self._flush_lock = threading.Lock()
@@ -61,6 +62,34 @@ class Uplink:
         self.store.push(kind, payload)
         self._wake.set()
 
+    @property
+    def uploads_snapshots(self):
+        return bool(self.s.snapshot_upload_path)
+
+    def queue_snapshot(self, name, path, ts):
+        """Queue a JPEG for upload. The alert refers to it by `name`."""
+        if self.uploads_snapshots:
+            self.enqueue("snapshot", {"facility": self.s.facility_id, "name": name,
+                                      "path": path, "ts": ts})
+
+    def _post(self, kind, payload):
+        """POST one outbox row. Returns a response, or None if the row is moot."""
+        url = self._url(self.paths[kind])
+        if kind != "snapshot":
+            return self.session.post(url, json=payload, headers=self._headers(),
+                                     timeout=self.timeout)
+        # PENDING backend: multipart field "file" + form fields facility/name/ts
+        try:
+            fh = open(payload["path"], "rb")
+        except OSError:
+            log.warning("snapshot %s gone from disk, skipping upload", payload["name"])
+            return None
+        with fh:
+            return self.session.post(
+                url, files={"file": (payload["name"], fh, "image/jpeg")},
+                data={k: payload[k] for k in ("facility", "name", "ts")},
+                headers=self._headers(), timeout=max(self.timeout, 30))
+
     def flush(self, batch=50):
         """Drain the outbox. Returns number of items delivered."""
         if not self._flush_lock.acquire(blocking=False):
@@ -72,14 +101,18 @@ class Uplink:
                 if not rows:
                     return sent
                 for row_id, kind, payload, attempts in rows:
+                    if not self.paths.get(kind):
+                        self.store.ack(row_id)   # endpoint since disabled in .env
+                        continue
                     try:
-                        resp = self.session.post(
-                            self._url(self.paths[kind]), json=payload,
-                            headers=self._headers(), timeout=self.timeout)
+                        resp = self._post(kind, payload)
                     except requests.RequestException as e:
                         log.info("backend unreachable, %d queued: %s",
                                  self.store.queue_size(), e)
                         return sent
+                    if resp is None:
+                        self.store.ack(row_id)
+                        continue
                     if resp.status_code < 300:
                         self.store.ack(row_id)
                         sent += 1
