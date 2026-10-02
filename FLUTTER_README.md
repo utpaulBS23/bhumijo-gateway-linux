@@ -364,10 +364,9 @@ Check pubspec.yaml for latest versions.
 3. **INTEGRATION_GUIDE.md** (Android) - Integration patterns
 4. **REMOTE_GATEWAY_SETUP.md** (Android) - Gateway configuration
 
-### Linux Gateway
-- **README.md** - Linux gateway overview
-- **SETUP.md** - Complete setup guide
-- **QUICKSTART.md** - Quick start reference
+### Facility Node (the Pi the app talks to)
+- **facility-node/SETUP.md** - Field setup guide (section 9: Facility app)
+- **facility-node/README.md** - Endpoints and behaviour
 
 ### Other Integration Points
 - **FLUTTER_MANAGER_APP.md** - This Flutter app
