@@ -352,6 +352,30 @@ The dummy prints every request exactly as the Pi sends it, which is handy for ag
 
 ---
 
+### Test the whole node against a dummy backend
+
+Before the real backend exists, run the dummy admin backend on the Pi. It answers every API the node calls:
+
+```bash
+cd /opt/facility-node && sudo -u facility ./venv/bin/python dev/dummy_backend.py --data /var/lib/facility/dummy-backend
+```
+
+In `.env`, set the following and restart the service:
+
+```ini
+ADMIN_URL=http://127.0.0.1:8091/api
+ADMIN_KEY=dummy-key
+QR_API_URL=/qr/validate
+```
+
+The dummy hands out `DUMMY-ALLOW-000{1,2,3}` and Auth Code `dummy-auth-code`. Watch what arrives at `http://192.168.10.104:8091/` (start it with `--host 0.0.0.0` and run `sudo ufw allow from 192.168.10.0/24 to any port 8091` for the duration of the test).
+
+Click **simulate outage** to check that doors keep opening and the queue drains afterwards with no duplicates.
+
+> ⚠️ Remove it before handover: set the real `ADMIN_URL` / `ADMIN_KEY`, stop the dummy, and run `sudo ufw delete allow from 192.168.10.0/24 to any port 8091`.
+
+---
+
 ## 8b. Odour sensors and alert
 
 ### What's measured
@@ -518,5 +542,6 @@ Then **revoke the test codes**: `facility qr revoke --label test`.
 - [ ] `DOOR_TEST_ENDPOINTS=0`
 - [ ] Test QR codes revoked (`qr list` shows none, or only staff codes with an expiry)
 - [ ] `QR_API_URL` is the real backend or empty, **not** the dummy (`127.0.0.1:8090`); the dummy is stopped
+- [ ] `ADMIN_URL` is the real backend, **not** the dummy backend (`127.0.0.1:8091`); no `ufw` rule for port 8091 (`sudo ufw status`)
 - [ ] Remote access via Cloudflare Tunnel only
 - [ ] SD image backed up

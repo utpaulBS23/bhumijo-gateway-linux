@@ -1,5 +1,9 @@
 """Admin backend client: queue-first pushes and the token/credential pull.
 
+Every outbound item gets a unique "id" (UUID) when queued, sent in the body
+and as the Idempotency-Key header. A retry after a lost reply resends the
+same id, so the backend can drop duplicates.
+
 Every outbound item is written to the SQLite outbox first, then drained
 oldest-first. A network error or 5xx stops the drain (backend unreachable,
 retry later); a 4xx means the backend rejected that item, which is retried a
@@ -9,6 +13,7 @@ few times and then dropped so one bad row cannot block the queue forever.
 import logging
 import threading
 import time
+import uuid
 from datetime import datetime
 
 import requests
@@ -62,6 +67,8 @@ class Uplink:
     # ---- push -------------------------------------------------------------
 
     def enqueue(self, kind, payload):
+        # Assigned once here, so every retry of this item carries the same id
+        payload = {"id": str(uuid.uuid4()), **payload}
         self.store.push(kind, payload)
         self._wake.set()
 
@@ -78,10 +85,13 @@ class Uplink:
     def _post(self, kind, payload):
         """POST one outbox row. Returns a response, or None if the row is moot."""
         url = self._url(self.paths[kind])
+        headers = self._headers()
+        if payload.get("id"):
+            headers["Idempotency-Key"] = payload["id"]
         if kind != "snapshot":
-            return self.session.post(url, json=payload, headers=self._headers(),
+            return self.session.post(url, json=payload, headers=headers,
                                      timeout=self.timeout)
-        # PENDING backend: multipart field "file" + form fields facility/name/ts
+        # Multipart: field "file" + form fields id/facility/name/ts
         try:
             fh = open(payload["path"], "rb")
         except OSError:
@@ -90,8 +100,8 @@ class Uplink:
         with fh:
             return self.session.post(
                 url, files={"file": (payload["name"], fh, "image/jpeg")},
-                data={k: payload[k] for k in ("facility", "name", "ts")},
-                headers=self._headers(), timeout=max(self.timeout, 30))
+                data={k: payload[k] for k in ("id", "facility", "name", "ts") if k in payload},
+                headers=headers, timeout=max(self.timeout, 30))
 
     def flush(self, batch=50):
         """Drain the outbox. Returns number of items delivered."""

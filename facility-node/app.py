@@ -214,6 +214,9 @@ def main():
     relay = Relay(s.relay_url, s.relay_pwd)
     uplink = Uplink(s, store)
     camera = Camera(s)
+    if any(h in s.admin_url for h in ("localhost", "127.0.0.1")):
+        log.warning("ADMIN_URL points at this machine (%s): dummy backend? "
+                    "Never leave this on in production", s.admin_url)
     snapshot = make_snapshotter(camera, uplink)
     qr_api = None
     if s.qr_api_url:
