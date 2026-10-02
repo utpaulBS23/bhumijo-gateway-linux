@@ -96,6 +96,16 @@ facility config      # fill in every CHANGE_ME, save -> service starts
 facility doctor      # everything ✓
 ```
 
+**From a git clone (recommended):**
+
+```bash
+git clone <repo-url> ~/bhumijo && cd ~/bhumijo
+sudo bash facility-node/deploy/bootstrap.sh   # install + auto-reinstall on every git pull
+facility config && facility doctor
+```
+
+**With Claude Code on the Pi:** run `claude` in the repo and say "install". It follows [`CLAUDE.md`](../CLAUDE.md).
+
 The full walkthrough is in **[INSTALL.md](INSTALL.md)**. Wiring and commissioning are in **[SETUP.md](SETUP.md)**.
 
 ---
@@ -327,7 +337,7 @@ Data on the Pi (`/var/lib/facility/`):
 | Change settings | `facility config` |
 | Test / staff QR codes | `facility qr create --label test` · `facility qr list` · `facility qr revoke --label test` |
 | Calibrate MQ sensors | `facility mq calibrate` |
-| Update | Copy the new folder → `sudo bash deploy/install.sh` (keeps `.env` and data) |
+| Update | `git pull` (auto-reinstalls after bootstrap) or `facility update`; scp copies: `sudo bash deploy/install.sh` |
 | Backup / spare Pi / uninstall | INSTALL.md sections 14–15 |
 
 ---
@@ -377,6 +387,8 @@ facility-node/
 ├── .env.example        Every setting, documented
 ├── deploy/
 │   ├── install.sh      Installer / updater
+│   ├── bootstrap.sh    One-time: enable git hooks + install
+│   ├── githooks/       post-merge / post-rewrite → reinstall on pull
 │   ├── uninstall.sh
 │   ├── facility        `facility` helper command
 │   └── facility-node.service

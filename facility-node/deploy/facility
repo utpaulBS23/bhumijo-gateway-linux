@@ -23,6 +23,7 @@ facility <command>
                                             facility qr list
                                             facility qr revoke --label test
   mq <args>         MQ gas sensors: facility mq read | facility mq calibrate
+  update            git pull the source checkout, reinstall, restart
   docs [name]       read the docs: readme | install | setup  (default: install)
   version           installed version
 USAGE
@@ -44,6 +45,15 @@ case "$cmd" in
             readme)  f=README.md ;; setup) f=SETUP.md ;; *) f=INSTALL.md ;;
         esac
         less "$DIR/docs/$f" ;;
+    update)
+        src="$(cat "$DIR/SOURCE" 2>/dev/null || true)"
+        [ -n "$src" ] && git -C "$src" rev-parse >/dev/null 2>&1 \
+            || { echo "no git checkout recorded; copy the new facility-node and run deploy/install.sh"; exit 1; }
+        owner="$(stat -c %U "$src")"
+        echo "pulling $(git -C "$src" remote get-url origin 2>/dev/null || echo origin) into $src"
+        sudo -u "$owner" env FACILITY_SKIP_AUTO_INSTALL=1 git -C "$src" pull --ff-only
+        sudo bash "$src/deploy/install.sh"
+        ;;
     version) cat "$DIR/VERSION" 2>/dev/null || echo unknown ;;
     help|-h|--help) usage ;;
     *) echo "unknown command: $cmd"; echo; usage; exit 1 ;;

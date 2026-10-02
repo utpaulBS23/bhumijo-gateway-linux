@@ -102,7 +102,7 @@ Pick **one** method.
 scp -r facility-node pi@192.168.10.104:~
 ```
 
-**With git (if the Pi can reach your git server):**
+**With git (recommended, if the Pi can reach your git server):**
 
 ```bash
 # on the Pi
@@ -110,7 +110,9 @@ sudo apt install -y git
 git clone <repo-url> ~/bhumijo && ln -s ~/bhumijo/facility-node ~/facility-node
 ```
 
-A git checkout lets you update later with `git pull`, and `facility version` shows the exact commit.
+With a git checkout:
+- **Updating is automatic:** after the bootstrap in step 6, every `git pull` reinstalls and restarts the node.
+- **Version is exact:** `facility version` shows the commit.
 
 **From a USB stick:** copy the `facility-node` folder onto the stick, plug it into the Pi, then:
 
@@ -124,10 +126,21 @@ sudo mount /dev/sda1 /mnt && cp -r /mnt/facility-node ~ && sudo umount /mnt
 
 ## 6. Run the installer
 
+**Git checkout:** bootstrap once. It turns on auto-install-on-pull, then runs the installer:
+
+```bash
+cd ~/bhumijo
+sudo bash facility-node/deploy/bootstrap.sh
+```
+
+**scp or USB copy:**
+
 ```bash
 cd ~/facility-node
 sudo bash deploy/install.sh
 ```
+
+> **Let Claude Code do it.** If Claude Code is installed on the Pi, run `claude` in `~/bhumijo` and say **"install"**. It follows `CLAUDE.md`: preflight, bootstrap, asks you for the `.env` secrets, doctor, tests, and a final report. Saying "update" or "check" works the same way.
 
 If your LAN isn't `192.168.10.0/24`, set it first:
 
@@ -297,6 +310,7 @@ facility status && facility doctor
 | `facility qr list` / `facility qr revoke --label test` | List or revoke Pi-made codes |
 | `facility mq read` / `facility mq calibrate` | MQ gas sensor values / clean-air calibration |
 | `facility docs install` / `setup` / `readme` | Read the docs (q to quit) |
+| `facility update` | `git pull` the checkout, reinstall, restart |
 | `facility version` | Installed version |
 
 ---
@@ -322,6 +336,20 @@ facility status && facility doctor
 
 ## 13. Update to a new version
 
+**Git checkout (bootstrapped):** just pull. The git hook reinstalls and restarts if anything under `facility-node/` changed:
+
+```bash
+cd ~/bhumijo && git pull
+```
+
+Or use the command, which works even without the hooks:
+
+```bash
+facility update
+```
+
+To pull **without** reinstalling, run `FACILITY_SKIP_AUTO_INSTALL=1 git pull`.
+
 **scp copy:**
 
 ```bash
@@ -329,12 +357,6 @@ facility status && facility doctor
 scp -r facility-node pi@192.168.10.104:~
 # Pi
 cd ~/facility-node && sudo bash deploy/install.sh
-```
-
-**git checkout:**
-
-```bash
-cd ~/bhumijo && git pull && cd facility-node && sudo bash deploy/install.sh
 ```
 
 The installer keeps `.env`, the database, snapshots and QR codes. It lists any **new settings** that this version added to `.env.example`, which you can copy into `.env` if you need them. It then restarts the service.

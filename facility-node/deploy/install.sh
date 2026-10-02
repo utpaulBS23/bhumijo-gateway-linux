@@ -40,6 +40,7 @@ cp "$SRC"/README.md "$SRC"/INSTALL.md "$SRC"/SETUP.md "$DEST/docs/"
 rm -rf "$DEST/dev" "$DEST/firmware" "$DEST/deploy"
 cp -r "$SRC/dev" "$SRC/firmware" "$SRC/deploy" "$DEST"/
 rm -f "$DEST/firmware/kc868/board_secrets.py"   # never ship a board password
+echo "$SRC" > "$DEST/SOURCE"   # where `facility update` pulls from
 if git -C "$SRC" rev-parse --short HEAD >/dev/null 2>&1; then
     echo "$(git -C "$SRC" describe --always --dirty) ($(date -u +%Y-%m-%dT%H:%MZ))" > "$DEST/VERSION"
 else
@@ -95,6 +96,10 @@ systemctl enable facility-node
 
 echo
 echo "Installed $(cat "$DEST/VERSION")"
+if git -C "$SRC" rev-parse >/dev/null 2>&1 \
+        && [ "$(git -C "$SRC" config core.hooksPath || true)" != "facility-node/deploy/githooks" ]; then
+    echo "Tip: sudo bash $SRC/deploy/bootstrap.sh  -> every 'git pull' then reinstalls automatically"
+fi
 if [ "$FIRST_INSTALL" = 1 ] || grep -q CHANGE_ME "$DEST/.env"; then
     cat <<NEXT
 
