@@ -1,0 +1,143 @@
+"""Admin backend client: queue-first pushes and the token/credential pull.
+
+Every outbound item is written to the SQLite outbox first, then drained
+oldest-first. A network error or 5xx stops the drain (backend unreachable,
+retry later); a 4xx means the backend rejected that item, which is retried a
+few times and then dropped so one bad row cannot block the queue forever.
+"""
+
+import logging
+import threading
+import time
+from datetime import datetime
+
+import requests
+
+log = logging.getLogger("uplink")
+
+MAX_REJECTS = 5
+
+
+def parse_expiry(value):
+    """expiresAt as unix seconds/ms or ISO 8601 -> unix seconds, None = no expiry."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return value / 1000.0 if value > 1e12 else float(value)
+    text = str(value).strip()
+    if text.replace(".", "", 1).isdigit():
+        return parse_expiry(float(text))
+    return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+
+
+class Uplink:
+    def __init__(self, settings, store, session=None, timeout=10.0):
+        self.s = settings
+        self.store = store
+        self.session = session or requests.Session()
+        self.timeout = timeout
+        self.paths = {
+            "sensor": settings.sensor_path,
+            "door_event": settings.door_event_path,
+            "alert": settings.alert_path,
+        }
+        self._wake = threading.Event()
+        self._flush_lock = threading.Lock()
+        self.last_pull_ok = None
+        self.last_flush_ok = None
+
+    def _headers(self):
+        key = self.s.admin_key
+        if self.s.admin_auth_scheme:
+            key = f"{self.s.admin_auth_scheme} {key}"
+        return {self.s.admin_auth_header: key}
+
+    def _url(self, path):
+        return f"{self.s.admin_url}{path}"
+
+    # ---- push -------------------------------------------------------------
+
+    def enqueue(self, kind, payload):
+        self.store.push(kind, payload)
+        self._wake.set()
+
+    def flush(self, batch=50):
+        """Drain the outbox. Returns number of items delivered."""
+        if not self._flush_lock.acquire(blocking=False):
+            return 0
+        sent = 0
+        try:
+            while True:
+                rows = self.store.peek(batch)
+                if not rows:
+                    return sent
+                for row_id, kind, payload, attempts in rows:
+                    try:
+                        resp = self.session.post(
+                            self._url(self.paths[kind]), json=payload,
+                            headers=self._headers(), timeout=self.timeout)
+                    except requests.RequestException as e:
+                        log.info("backend unreachable, %d queued: %s",
+                                 self.store.queue_size(), e)
+                        return sent
+                    if resp.status_code < 300:
+                        self.store.ack(row_id)
+                        sent += 1
+                        self.last_flush_ok = time.time()
+                    elif resp.status_code >= 500 or resp.status_code in (401, 403, 408, 429):
+                        # Server or auth trouble: not this row's fault, retry later
+                        log.warning("backend HTTP %d on %s, pausing drain",
+                                    resp.status_code, kind)
+                        return sent
+                    else:
+                        self.store.bump_attempts(row_id)
+                        if attempts + 1 >= MAX_REJECTS:
+                            log.error("dropping %s after %d rejects (HTTP %d): %s",
+                                      kind, MAX_REJECTS, resp.status_code, payload)
+                            self.store.ack(row_id)
+                        else:
+                            return sent
+        finally:
+            self._flush_lock.release()
+
+    # ---- pull -------------------------------------------------------------
+
+    def pull_tokens(self):
+        """Refresh token cache + Auth Code. On any failure the cache is kept."""
+        try:
+            resp = self.session.get(
+                self._url(self.s.tokens_path), params={"facility": self.s.facility_id},
+                headers=self._headers(), timeout=self.timeout)
+            resp.raise_for_status()
+            body = resp.json()
+            if body.get("facilityId") not in (None, self.s.facility_id):
+                log.error("pull returned facilityId %r, expected %r; ignoring",
+                          body.get("facilityId"), self.s.facility_id)
+                return False
+            tokens = [(t["token"], parse_expiry(t.get("expiresAt")))
+                      for t in body.get("tokens", [])]
+        except (requests.RequestException, ValueError, KeyError, TypeError) as e:
+            log.warning("token pull failed, keeping cache: %s", e)
+            return False
+        self.store.replace_tokens(tokens)
+        # PENDING backend: field carrying the Facility-app Auth Code
+        auth_code = body.get("authCode")
+        if auth_code:
+            self.store.set_auth_code(auth_code)
+        self.store.set_cred("last_pull", str(time.time()))
+        self.last_pull_ok = time.time()
+        log.info("token cache refreshed: %d tokens", len(tokens))
+        return True
+
+    # ---- background loops -------------------------------------------------
+
+    def run_flush_loop(self, stop):
+        while not stop.is_set():
+            self.flush()
+            self._wake.wait(self.s.flush_interval)
+            self._wake.clear()
+
+    def run_pull_loop(self, stop):
+        while not stop.is_set():
+            self.pull_tokens()
+            stop.wait(self.s.pull_interval)

@@ -1,0 +1,7 @@
+.env
+board_secrets.py
+__pycache__/
+*.db
+*.db-wal
+*.db-shm
+venv/
