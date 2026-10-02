@@ -11,7 +11,7 @@ from dataclasses import replace
 import requests
 
 from app import FailureLimiter, create_app
-from config import ConfigError, Settings
+from config import ConfigError, DoorSpec, Settings
 from door import DoorController
 from inputs import run_exit_poller
 from relay import Relay, RelayError, parse_states
@@ -28,9 +28,21 @@ ENV = {
 }
 
 
-def settings(**kw):
+TWO_DOORS = {
+    "DOORS": "male,female",
+    "DOOR_MALE_RELAY": "1", "DOOR_MALE_EXIT_INPUT": "0", "DOOR_MALE_REED_GPIO": "27",
+    "DOOR_MALE_SCANNER_IPS": "192.168.10.101",
+    "DOOR_FEMALE_RELAY": "2", "DOOR_FEMALE_EXIT_INPUT": "1", "DOOR_FEMALE_REED_GPIO": "22",
+    "DOOR_FEMALE_SCANNER_IPS": "192.168.10.102",
+}
+
+MAIN = DoorSpec("main", 1, 0, 27, ())
+
+
+def settings(env=None, **kw):
     old = dict(os.environ)
     os.environ.update(ENV)
+    os.environ.update(env or {})
     try:
         s = Settings.from_env()
     finally:
@@ -111,15 +123,20 @@ class FakeSession:
         return self.get_resp
 
 
-def make_door(**kw):
-    s = settings(**kw)
+def make_doors(env=None, **kw):
+    s = settings(env, **kw)
     store = Store(":memory:")
     store.replace_tokens([("good", None), ("old", 1.0)])
     store.set_auth_code("auth-code-123")
     relay, up, clock = FakeRelay(), FakeUplink(), Clock()
-    door = DoorController(s, store, relay, up, snapshot=lambda: "snap.jpg",
-                          clock=clock, spawn=lambda fn: fn())
-    return door, relay, up, clock, store
+    doors = [DoorController(s, spec, store, relay, up, snapshot=lambda: "snap.jpg",
+                            clock=clock, spawn=lambda fn: fn()) for spec in s.doors]
+    return doors, relay, up, clock, store
+
+
+def make_door(**kw):
+    doors, relay, up, clock, store = make_doors(**kw)
+    return doors[0], relay, up, clock, store
 
 
 class DoorTests(unittest.TestCase):
@@ -209,7 +226,7 @@ class DoorTests(unittest.TestCase):
         self.assertNotIn("snapshot", alerts[1])
         self.assertEqual(alerts[-1]["duration_s"], 680)
         self.assertEqual(up.of("door_event")[-1],
-                         {"facility": "facility-001", "type": "door_closed",
+                         {"facility": "facility-001", "section": "main", "type": "door_closed",
                           "ts": up.of("door_event")[-1]["ts"], "duration_s": 680})
 
     def test_short_open_sends_no_propped_alerts(self):
@@ -236,7 +253,7 @@ class OfflineTests(unittest.TestCase):
         self.store.replace_tokens([("good", None)])
         self.store.set_auth_code("code")
         relay = FakeRelay()
-        door = DoorController(self.s, self.store, relay, self.uplink, spawn=lambda fn: fn())
+        door = DoorController(self.s, MAIN, self.store, relay, self.uplink, spawn=lambda fn: fn())
         self.assertEqual(door.qr("good"), "opened")
         self.assertEqual(door.facility_open("code"), "opened")
         self.assertEqual(self.uplink.flush(), 0)
@@ -370,10 +387,12 @@ class RelayTests(unittest.TestCase):
                 return [self.n == 2, False, False, False]
 
         class D:
+            door = MAIN
+
             def exit_input(self, pressed):
                 seen.append(pressed)
 
-        run_exit_poller(settings(exit_poll_interval=0), R(), D(), stop)
+        run_exit_poller(settings(exit_poll_interval=0), R(), [D()], stop)
         self.assertEqual(seen, [False, True, False])
 
 
@@ -384,7 +403,7 @@ class AppTests(unittest.TestCase):
 
     def client(self, **kw):
         s = replace(self.door.s, **kw)
-        return create_app(s, self.door, self.store, self.uplink,
+        return create_app(s, [self.door], self.store, self.uplink,
                           limiter=FailureLimiter(max_failures=3)).test_client()
 
     def test_endpoints(self):
@@ -409,6 +428,139 @@ class AppTests(unittest.TestCase):
         r = c.post("/facility/open", json={"authCode": "auth-code-123"})
         self.assertEqual(r.status_code, 429)
         self.assertEqual(self.relay.fired, [])
+
+
+class TwoDoorTests(unittest.TestCase):
+    """Male door: scanner .101, Relay01, Input01, GPIO27.
+    Female door: scanner .102, Relay02, Input02, GPIO22."""
+
+    def setUp(self):
+        self.doors, self.relay, self.up, self.clock, self.store = make_doors(TWO_DOORS)
+        self.male, self.female = self.doors
+        uplink = Uplink(self.male.s, self.store, session=FakeSession())
+        self.c = create_app(self.male.s, self.doors, self.store, uplink,
+                            limiter=FailureLimiter(max_failures=3)).test_client()
+
+    def scan(self, ip, token="good"):
+        return self.c.post("/qr", json={"token": token}, environ_base={"REMOTE_ADDR": ip})
+
+    def test_config_parsed(self):
+        self.assertEqual(self.male.door, DoorSpec("male", 1, 0, 27, ("192.168.10.101",)))
+        self.assertEqual(self.female.door, DoorSpec("female", 2, 1, 22, ("192.168.10.102",)))
+
+    def test_scanner_ip_selects_door(self):
+        r = self.scan("192.168.10.101")
+        self.assertEqual((r.status_code, r.json["door"]), (200, "male"))
+        r = self.scan("192.168.10.102")
+        self.assertEqual((r.status_code, r.json["door"]), (200, "female"))
+        self.assertEqual(self.relay.fired, [1, 2])
+        self.assertEqual([(e["section"], e["type"]) for e in self.up.of("door_event")],
+                         [("male", "entry"), ("female", "entry")])
+
+    def test_any_valid_token_opens_either_door(self):
+        self.assertEqual(self.scan("192.168.10.101").status_code, 200)
+        self.assertEqual(self.scan("192.168.10.102").status_code, 200)
+
+    def test_unknown_scanner_rejected(self):
+        r = self.scan("192.168.10.50")
+        self.assertEqual((r.status_code, r.json["result"]), (403, "unknown_scanner"))
+        self.assertEqual(self.relay.fired, [])
+
+    def test_bad_token_denied_at_its_door(self):
+        r = self.scan("192.168.10.102", token="nope")
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(self.up.of("door_event")[0]["section"], "female")
+
+    def test_facility_app_must_name_door(self):
+        r = self.c.post("/facility/open", json={"authCode": "auth-code-123"})
+        self.assertEqual((r.status_code, r.json["result"]), (400, "unknown_door"))
+        r = self.c.post("/facility/open", json={"authCode": "auth-code-123", "door": "female"})
+        self.assertEqual((r.status_code, r.json["door"]), (200, "female"))
+        r = self.c.post("/facility/open", headers={"X-Auth-Code": "auth-code-123", "X-Door": "Male"})
+        self.assertEqual((r.status_code, r.json["door"]), (200, "male"))
+        self.assertEqual(self.relay.fired, [2, 1])
+
+    def test_doors_track_state_independently(self):
+        self.scan("192.168.10.101")
+        self.male.door_opened()       # legit: male trigger
+        self.female.door_opened()     # no female trigger -> forced
+        alerts = self.up.of("alert")
+        self.assertEqual([(a["section"], a["subtype"]) for a in alerts],
+                         [("female", "forced_open")])
+
+    def test_exit_inputs_routed_per_door(self):
+        import threading
+        stop = threading.Event()
+
+        class R:
+            n = 0
+
+            def read_inputs(self):
+                R.n += 1
+                if R.n >= 2:
+                    stop.set()
+                return [False, True, False, False]   # Input02 = female exit
+
+        run_exit_poller(replace(self.male.s, exit_poll_interval=0), R(), self.doors, stop)
+        self.assertEqual([(e["section"], e["type"]) for e in self.up.of("door_event")],
+                         [("female", "exit")])
+
+    def test_known_scanner_never_rate_limited(self):
+        for _ in range(10):
+            self.assertEqual(self.scan("192.168.10.101", token="nope").status_code, 403)
+        self.assertEqual(self.scan("192.168.10.101").status_code, 200)
+
+    def test_scanner_ip_not_exempt_on_facility_open(self):
+        env = {"REMOTE_ADDR": "192.168.10.101"}
+        for _ in range(3):
+            self.c.post("/facility/open", json={"authCode": "x", "door": "male"}, environ_base=env)
+        r = self.c.post("/facility/open", json={"authCode": "auth-code-123", "door": "male"},
+                        environ_base=env)
+        self.assertEqual(r.status_code, 429)
+
+    def test_unknown_scanner_rate_limited(self):
+        for _ in range(3):
+            self.scan("192.168.10.50")
+        self.assertEqual(self.scan("192.168.10.50").status_code, 429)
+
+    def test_health_lists_doors(self):
+        h = self.c.get("/health").json
+        self.assertEqual(sorted(h["doors"]), ["female", "male"])
+        self.assertEqual(h["doors"]["female"]["scanners"], ["192.168.10.102"])
+
+
+class DoorConfigTests(unittest.TestCase):
+    def bad(self, **overrides):
+        env = dict(TWO_DOORS, **overrides)
+        with self.assertRaises(ConfigError):
+            settings(env)
+
+    def test_duplicate_relay_rejected(self):
+        self.bad(DOOR_FEMALE_RELAY="1")
+
+    def test_duplicate_scanner_rejected(self):
+        self.bad(DOOR_FEMALE_SCANNER_IPS="192.168.10.101")
+
+    def test_duplicate_reed_gpio_rejected(self):
+        self.bad(DOOR_FEMALE_REED_GPIO="27")
+
+    def test_missing_scanner_ips_rejected_for_multi_door(self):
+        self.bad(DOOR_FEMALE_SCANNER_IPS="")
+
+    def test_missing_relay_rejected(self):
+        self.bad(DOOR_FEMALE_RELAY="")
+
+    def test_bad_ip_rejected(self):
+        with self.assertRaises(ValueError):
+            settings(dict(TWO_DOORS, DOOR_MALE_SCANNER_IPS="192.168.10.999"))
+
+    def test_optional_exit_and_reed(self):
+        s = settings(dict(TWO_DOORS, DOOR_FEMALE_EXIT_INPUT="none", DOOR_FEMALE_REED_GPIO=""))
+        self.assertEqual((s.doors[1].exit_input, s.doors[1].reed_gpio), (None, None))
+
+    def test_single_door_fallback(self):
+        s = settings()
+        self.assertEqual(s.doors, (MAIN,))
 
 
 class MiscTests(unittest.TestCase):

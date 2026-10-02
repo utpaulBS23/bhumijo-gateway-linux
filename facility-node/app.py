@@ -2,11 +2,11 @@
 
 LAN only. Never expose port 5454 to the internet.
 
-    POST /qr              {token}      QR scanner -> validate locally, open
-    POST /facility/open   {authCode}   Facility app -> Auth Code check, open
-    POST /door/opened                  bench test only (DOOR_TEST_ENDPOINTS=1)
-    POST /door/closed                  bench test only (DOOR_TEST_ENDPOINTS=1)
-    GET  /health                       liveness + queue size
+    POST /qr              {token}            QR scanner; door chosen by scanner IP
+    POST /facility/open   {authCode, door}   Facility app; door = section name
+    POST /door/opened     ?door=<name>       bench test only (DOOR_TEST_ENDPOINTS=1)
+    POST /door/closed     ?door=<name>       bench test only (DOOR_TEST_ENDPOINTS=1)
+    GET  /health                             liveness + queue size
 """
 
 import logging
@@ -18,7 +18,8 @@ from flask import Flask, jsonify, request
 
 log = logging.getLogger("app")
 
-STATUS = {"opened": 200, "denied": 403, "relay_error": 502}
+STATUS = {"opened": 200, "denied": 403, "relay_error": 502,
+          "unknown_scanner": 403, "unknown_door": 400}
 
 
 class FailureLimiter:
@@ -49,41 +50,74 @@ class FailureLimiter:
             q.append(now)
 
 
-def create_app(settings, door, store, uplink, camera=None, limiter=None):
+def create_app(settings, doors, store, uplink, camera=None, limiter=None):
+    """doors: list of DoorController, one per section."""
     app = Flask(__name__)
     limiter = limiter or FailureLimiter()
+    by_name = {d.name: d for d in doors}
+    by_scanner = {ip: d for d in doors for ip in d.door.scanner_ips}
+    # Single door with no scanner IPs configured: accept scans from anywhere
+    any_scanner = doors[0] if len(doors) == 1 and not doors[0].door.scanner_ips else None
 
     def body():
         return request.get_json(silent=True) or {}
 
-    def unlock(fn, value):
+    def reply(result, door=None):
+        return (jsonify(ok=result == "opened", result=result,
+                        door=door.name if door else None), STATUS[result])
+
+    def unlock(door, fn_name, value):
         ip = request.remote_addr or "?"
+        # Known scanners are exempt: a run of bad codes at the door must not
+        # lock the scanner out for everyone. Tokens can't be brute-forced by
+        # holding codes up to a camera anyway.
+        if fn_name == "qr" and ip in by_scanner:
+            return reply(door.qr(value), door)
         if limiter.blocked(ip):
             return jsonify(ok=False, result="rate_limited"), 429
-        result = fn(value)
+        if door is None:
+            limiter.fail(ip)
+            return reply("unknown_scanner" if fn_name == "qr" else "unknown_door")
+        result = getattr(door, fn_name)(value)
         if result == "denied":
             limiter.fail(ip)
-        return jsonify(ok=result == "opened", result=result), STATUS[result]
+        return reply(result, door)
+
+    def named_door(name):
+        if name is None and len(doors) == 1:
+            return doors[0]
+        return by_name.get(str(name).strip().lower()) if name else None
 
     @app.post("/qr")
     def qr():
-        return unlock(door.qr, body().get("token"))
+        door = by_scanner.get(request.remote_addr) or any_scanner
+        if door is None:
+            log.warning("scan from unknown scanner %s", request.remote_addr)
+        return unlock(door, "qr", body().get("token"))
 
     @app.post("/facility/open")
     def facility_open():
-        code = request.headers.get("X-Auth-Code") or body().get("authCode")
-        return unlock(door.facility_open, code)
+        data = body()
+        code = request.headers.get("X-Auth-Code") or data.get("authCode")
+        door = named_door(request.headers.get("X-Door") or data.get("door"))
+        return unlock(door, "facility_open", code)
 
     if settings.door_test_endpoints:
         @app.post("/door/opened")
         def door_opened():
+            door = named_door(request.args.get("door"))
+            if door is None:
+                return reply("unknown_door")
             door.door_opened()
-            return jsonify(ok=True)
+            return jsonify(ok=True, door=door.name)
 
         @app.post("/door/closed")
         def door_closed():
+            door = named_door(request.args.get("door"))
+            if door is None:
+                return reply("unknown_door")
             door.door_closed()
-            return jsonify(ok=True)
+            return jsonify(ok=True, door=door.name)
 
     @app.get("/health")
     def health():
@@ -95,7 +129,8 @@ def create_app(settings, door, store, uplink, camera=None, limiter=None):
             auth_code_cached=store.get_cred("auth_code_sha256") is not None,
             last_pull=uplink.last_pull_ok,
             last_flush=uplink.last_flush_ok,
-            door_open=door.is_open,
+            doors={d.name: {"open": d.is_open, "relay": d.door.relay,
+                            "scanners": list(d.door.scanner_ips)} for d in doors},
             reed=settings.reed,
             camera=camera.snapshot_status() if camera else None,
         )
@@ -123,14 +158,15 @@ def main():
     relay = Relay(s.relay_url, s.relay_pwd)
     uplink = Uplink(s, store)
     camera = Camera(s)
-    door = DoorController(s, store, relay, uplink, snapshot=camera.snapshot)
+    doors = [DoorController(s, spec, store, relay, uplink, snapshot=camera.snapshot)
+             for spec in s.doors]
 
     stop = threading.Event()
     jobs = [
         lambda: uplink.run_pull_loop(stop),
         lambda: uplink.run_flush_loop(stop),
-        lambda: run_exit_poller(s, relay, door, stop),
-        lambda: run_door_ticker(door, stop),
+        lambda: run_exit_poller(s, relay, doors, stop),
+        lambda: run_door_ticker(doors, stop),
         lambda: run_sensor_loop(s, Sensors(), camera, uplink, stop),
         lambda: camera.run_probe_loop(stop),
         lambda: camera.run_frame_loop(stop),
@@ -138,11 +174,19 @@ def main():
     for job in jobs:
         threading.Thread(target=job, daemon=True).start()
 
-    if s.reed:
-        ReedSwitch(s, door)
+    # Keep references: a garbage-collected gpiozero Button stops firing callbacks
+    reeds = [ReedSwitch(s, d) for d in doors if s.reed and d.door.reed_gpio is not None]
 
+    for d in s.doors:
+        log.info("door %s: relay %d, exit input %s, reed GPIO %s, scanners %s",
+                 d.name, d.relay, d.exit_input, d.reed_gpio, ", ".join(d.scanner_ips) or "any")
     log.info("facility node %s listening on %s:%d", s.facility_id, s.host, s.port)
-    create_app(s, door, store, uplink, camera).run(host=s.host, port=s.port, threaded=True)
+    try:
+        create_app(s, doors, store, uplink, camera).run(host=s.host, port=s.port, threaded=True)
+    finally:
+        stop.set()
+        for reed in reeds:
+            reed.close()
 
 
 if __name__ == "__main__":

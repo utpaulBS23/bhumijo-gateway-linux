@@ -4,8 +4,11 @@ Production loads /opt/facility-node/.env via systemd EnvironmentFile, so one
 code image serves every site. Secrets have no defaults.
 """
 
+import ipaddress
 import os
+import re
 from dataclasses import dataclass
+from typing import Optional, Tuple
 
 PLACEHOLDER = "CHANGE_ME"
 
@@ -44,14 +47,88 @@ def _float(name, default):
 
 
 @dataclass(frozen=True)
+class DoorSpec:
+    """One physical door: its relay channel, exit input, reed pin and scanners."""
+    name: str                     # section, e.g. "male" / "female"
+    relay: int                    # KC868 channel 1-4 wired to this door's timer
+    exit_input: Optional[int]     # KC868 input index 0-3 (0 = Input01), None = no exit tap
+    reed_gpio: Optional[int]      # Pi BCM pin for this door's MC-38, None = no reed
+    scanner_ips: Tuple[str, ...]  # QR scanners whose scans open this door
+
+
+def _optional_int(name):
+    value = _env(name)
+    if value is None or value.lower() == "none":
+        return None
+    return int(value)
+
+
+def _ips(name):
+    raw = _env(name, "")
+    ips = tuple(p.strip() for p in raw.split(",") if p.strip())
+    for ip in ips:
+        ipaddress.ip_address(ip)   # ValueError on typos
+    return ips
+
+
+def _parse_doors():
+    """DOORS=male,female + DOOR_<NAME>_{RELAY,EXIT_INPUT,REED_GPIO,SCANNER_IPS}.
+
+    Without DOORS: a single door named "main" from DOOR_RELAY / EXIT_INPUT_INDEX /
+    REED_GPIO / SCANNER_IPS (empty SCANNER_IPS = accept scans from any IP).
+    """
+    names = _env("DOORS")
+    if names is None:
+        doors = (DoorSpec("main", _int("DOOR_RELAY", 1), _int("EXIT_INPUT_INDEX", 0),
+                          _int("REED_GPIO", 27), _ips("SCANNER_IPS")),)
+    else:
+        doors = []
+        for name in [n.strip().lower() for n in names.split(",") if n.strip()]:
+            if not re.fullmatch(r"[a-z0-9_]+", name):
+                raise ConfigError(f"bad door name {name!r} in DOORS")
+            pre = f"DOOR_{name.upper()}_"
+            relay = _env(pre + "RELAY")
+            if relay is None:
+                raise ConfigError(f"{pre}RELAY is required")
+            doors.append(DoorSpec(name, int(relay), _optional_int(pre + "EXIT_INPUT"),
+                                  _optional_int(pre + "REED_GPIO"), _ips(pre + "SCANNER_IPS")))
+        doors = tuple(doors)
+    _validate_doors(doors)
+    return doors
+
+
+def _validate_doors(doors):
+    if not doors:
+        raise ConfigError("DOORS is empty")
+
+    def unique(label, values):
+        values = [v for v in values if v is not None]
+        dupes = {v for v in values if values.count(v) > 1}
+        if dupes:
+            raise ConfigError(f"{label} used by more than one door: {sorted(dupes)}")
+
+    unique("door name", [d.name for d in doors])
+    unique("relay channel", [d.relay for d in doors])
+    unique("exit input", [d.exit_input for d in doors])
+    unique("reed GPIO", [d.reed_gpio for d in doors])
+    unique("scanner IP", [ip for d in doors for ip in d.scanner_ips])
+    for d in doors:
+        if not 1 <= d.relay <= 4:
+            raise ConfigError(f"door {d.name}: relay {d.relay} not in 1-4")
+        if d.exit_input is not None and not 0 <= d.exit_input <= 3:
+            raise ConfigError(f"door {d.name}: exit input {d.exit_input} not in 0-3")
+    if len(doors) > 1 and any(not d.scanner_ips for d in doors):
+        raise ConfigError("with several doors, every door needs SCANNER_IPS")
+
+
+@dataclass(frozen=True)
 class Settings:
     facility_id: str
 
     # KC868-A4S
     relay_url: str
     relay_pwd: str
-    door_relay: int            # 1-based relay channel wired to the timer module
-    exit_input_index: int      # 0 = Input01
+    doors: Tuple[DoorSpec, ...]
     exit_poll_interval: float  # seconds between input_ctl.cgi polls
 
     # Admin backend
@@ -76,8 +153,7 @@ class Settings:
     max_queue: int
 
     # Reed switch (MC-38)
-    reed: bool
-    reed_gpio: int
+    reed: bool                 # enable reed watching on doors that have a REED_GPIO
     reed_active_high: bool
     propped_threshold: int
     propped_repeat: int
@@ -101,8 +177,7 @@ class Settings:
             facility_id=_required("FACILITY_ID"),
             relay_url=_required("RELAY_URL").rstrip("/"),
             relay_pwd=_required("RELAY_PWD"),
-            door_relay=_int("DOOR_RELAY", 1),
-            exit_input_index=_int("EXIT_INPUT_INDEX", 0),
+            doors=_parse_doors(),
             exit_poll_interval=_float("EXIT_POLL_INTERVAL", 0.2),
             admin_url=_required("ADMIN_URL").rstrip("/"),
             admin_key=_required("ADMIN_KEY"),
@@ -119,7 +194,6 @@ class Settings:
             db_path=_env("DB_PATH", "/var/lib/facility/facility.db"),
             max_queue=_int("MAX_QUEUE", 200000),
             reed=_bool("REED", False),
-            reed_gpio=_int("REED_GPIO", 27),
             reed_active_high=_bool("REED_ACTIVE_HIGH", False),
             propped_threshold=_int("PROPPED_THRESHOLD", 300),
             propped_repeat=_int("PROPPED_REPEAT", 180),

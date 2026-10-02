@@ -11,9 +11,9 @@ log = logging.getLogger("inputs")
 
 
 class ReedSwitch:
-    """MC-38 on a Pi 5 GPIO via gpiozero + lgpio.
+    """One door's MC-38 on a Pi 5 GPIO via gpiozero + lgpio.
 
-    Wiring: one leg to REED_GPIO, the other to GND, internal pull-up.
+    Wiring: one leg to the door's REED_GPIO, the other to GND, internal pull-up.
     Magnet present (door shut) closes the reed -> pin LOW -> "pressed".
     REED_ACTIVE_HIGH=1 flips this for NC-type sensors.
     """
@@ -21,7 +21,8 @@ class ReedSwitch:
     def __init__(self, settings, door):
         from gpiozero import Button   # lazy: only on the Pi
         self.door = door
-        self.button = Button(settings.reed_gpio, pull_up=True, bounce_time=0.05)
+        pin = door.door.reed_gpio
+        self.button = Button(pin, pull_up=True, bounce_time=0.05)
         # Explicit lambdas: gpiozero may pass the device as the first argument
         opened, closed = (lambda: door.door_opened()), (lambda: door.door_closed())
         if settings.reed_active_high:
@@ -30,8 +31,8 @@ class ReedSwitch:
         else:
             self.button.when_pressed, self.button.when_released = closed, opened
             initially_open = not self.button.is_pressed
-        log.info("reed on GPIO%d, door initially %s",
-                 settings.reed_gpio, "open" if initially_open else "closed")
+        log.info("[%s] reed on GPIO%d, door initially %s",
+                 door.name, pin, "open" if initially_open else "closed")
         if initially_open:
             # Booted with the door open: track it so propped alerts still fire
             door.door_opened(at_boot=True)
@@ -40,8 +41,11 @@ class ReedSwitch:
         self.button.close()
 
 
-def run_exit_poller(settings, relay, door, stop):
-    """Poll input_ctl.cgi and feed the exit-button state to the door."""
+def run_exit_poller(settings, relay, doors, stop):
+    """Poll input_ctl.cgi once per cycle and feed each door its exit input."""
+    watched = [d for d in doors if d.door.exit_input is not None]
+    if not watched:
+        return
     warned = False
     backoff = settings.exit_poll_interval
     while not stop.is_set():
@@ -54,7 +58,8 @@ def run_exit_poller(settings, relay, door, stop):
                     warned = True
                 stop.wait(30)
                 continue
-            door.exit_input(inputs[settings.exit_input_index])
+            for door in watched:
+                door.exit_input(inputs[door.door.exit_input])
             backoff = settings.exit_poll_interval
         except RelayError as e:
             log.warning("exit poll failed: %s", e)
@@ -62,7 +67,8 @@ def run_exit_poller(settings, relay, door, stop):
         stop.wait(backoff)
 
 
-def run_door_ticker(door, stop, interval=1.0):
+def run_door_ticker(doors, stop, interval=1.0):
     while not stop.is_set():
-        door.tick()
+        for door in doors:
+            door.tick()
         stop.wait(interval)

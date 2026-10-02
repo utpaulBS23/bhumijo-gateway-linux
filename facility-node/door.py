@@ -1,5 +1,8 @@
 """Door authority: decides who may open, fires the relay, classifies openings.
 
+One DoorController per physical door (section). Each has its own relay
+channel, exit input and reed state; the store and uplink are shared.
+
 Unlock decisions use only the local store, so the door opens offline. Every
 event is queued via the uplink; nothing here blocks on the network.
 
@@ -22,9 +25,11 @@ def iso(ts):
 
 
 class DoorController:
-    def __init__(self, settings, store, relay, uplink, snapshot=None,
+    def __init__(self, settings, door, store, relay, uplink, snapshot=None,
                  clock=time.time, spawn=None):
         self.s = settings
+        self.door = door            # config.DoorSpec
+        self.name = door.name
         self.store = store
         self.relay = relay
         self.uplink = uplink
@@ -41,7 +46,8 @@ class DoorController:
     # ---- events -----------------------------------------------------------
 
     def _door_event(self, type_, source=None, **extra):
-        payload = {"facility": self.s.facility_id, "type": type_, "ts": iso(self.clock())}
+        payload = {"facility": self.s.facility_id, "section": self.name,
+                   "type": type_, "ts": iso(self.clock())}
         if source:
             payload["source"] = source
         payload.update(extra)
@@ -51,8 +57,8 @@ class DoorController:
         ts = self.clock()
 
         def send():
-            payload = {"facility": self.s.facility_id, "type": "anomaly",
-                       "subtype": subtype, "ts": iso(ts)}
+            payload = {"facility": self.s.facility_id, "section": self.name,
+                       "type": "anomaly", "subtype": subtype, "ts": iso(ts)}
             payload.update(extra)
             if with_snapshot:
                 ref = self.snapshot()
@@ -64,10 +70,10 @@ class DoorController:
 
     def _fire(self):
         try:
-            self.relay.fire(self.s.door_relay)
+            self.relay.fire(self.door.relay)
             return True
         except RelayError as e:
-            log.error("relay failed: %s", e)
+            log.error("[%s] relay failed: %s", self.name, e)
             return False
 
     # ---- unlock paths -----------------------------------------------------
@@ -75,7 +81,7 @@ class DoorController:
     def qr(self, token):
         """QR scanner. Returns 'opened' | 'denied' | 'relay_error'."""
         if not self.store.token_valid(token, self.clock()):
-            log.info("QR denied")
+            log.info("[%s] QR denied", self.name)
             self._door_event("denied", source="qr")
             return "denied"
         return self._open("entry", "qr")
@@ -83,7 +89,7 @@ class DoorController:
     def facility_open(self, auth_code):
         """Facility app, authenticated by the per-facility Auth Code."""
         if not self.store.auth_code_valid(auth_code):
-            log.info("Facility app denied")
+            log.info("[%s] Facility app denied", self.name)
             self._door_event("denied", source="facility_app")
             return "denied"
         return self._open("attendant", "facility_app")
@@ -126,7 +132,7 @@ class DoorController:
             if legit:
                 self._last_trigger = None   # one trigger covers one opening
         if not legit:
-            log.warning("door opened with no trigger: forced_open")
+            log.warning("[%s] door opened with no trigger: forced_open", self.name)
             self._alert("forced_open", with_snapshot=True)
 
     def door_closed(self):

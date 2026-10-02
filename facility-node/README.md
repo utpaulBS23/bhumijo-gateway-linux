@@ -7,6 +7,38 @@ The internet is never in the unlock path. QR tokens and the Facility-app Auth Co
 are cached locally; all events go into a SQLite queue first and drain to the admin
 backend when it's reachable.
 
+## Network and doors
+
+Static IPs (reserved at the router, **outside the DHCP pool**):
+
+| Device | IP | Notes |
+|---|---|---|
+| Router / gateway | 192.168.10.100 | Pi's default gateway + DNS |
+| QR scanner (male) | 192.168.10.101 | → `POST /qr` on the Pi |
+| QR scanner (female) | 192.168.10.102 | → `POST /qr` on the Pi |
+| Raspberry Pi 5 | 192.168.10.104 | `:5454` |
+| KC868-A4S relay | 192.168.10.174 | `:80` |
+| IP camera | 192.168.10.180 | RTSP `:554` |
+
+Point each scanner's upload URL at `http://192.168.10.104:5454/qr`.
+
+| Door | Scanner | Relay | Exit button | Reed (BCM) |
+|---|---|---|---|---|
+| male | .101 | Relay01 | Input01 | GPIO27 |
+| female | .102 | Relay02 | Input02 | GPIO22 |
+
+- **Scan routing:** a scan is routed to a door by the scanner's source IP. A scan from any other IP gets `403 unknown_scanner`.
+- **Tokens:** any valid token opens either door.
+- **Events:** every door-event and alert carries `"section": "male" | "female"`.
+- **Config checks:** the node refuses to start if two doors share a relay, input, GPIO or scanner IP.
+
+If the Pi's IP is set on the Pi itself rather than by a router reservation:
+
+```bash
+sudo nmcli con mod "Wired connection 1" ipv4.method manual \
+  ipv4.addresses 192.168.10.104/24 ipv4.gateway 192.168.10.100 ipv4.dns 192.168.10.100
+```
+
 ## Layout
 
 | File | Role |
@@ -14,7 +46,7 @@ backend when it's reachable.
 | `config.py` | Settings from env / `.env` |
 | `store.py` | SQLite: token cache, hashed Auth Code, outbound queue |
 | `relay.py` | KC868-A4S: `sw_ctl.cgi` fire, `input_ctl.cgi` inputs |
-| `door.py` | Unlock decisions + open classification + propped/forced alerts |
+| `door.py` | Per-door unlock decisions + open classification + propped/forced alerts |
 | `uplink.py` | 4 admin APIs: push sensor / door-event / alert, pull tokens |
 | `sensors_camera.py` | ENS160 + AHT20 (smbus2), camera probe / frame check / snapshot |
 | `inputs.py` | MC-38 reed (gpiozero + lgpio), exit-button poller |
@@ -27,10 +59,10 @@ backend when it's reachable.
 
 | Method + path | Caller | Body |
 |---|---|---|
-| `POST /qr` | QR scanner | `{token}` → 200 opened / 403 denied / 502 relay error |
-| `POST /facility/open` | Facility app | `{authCode}` or `X-Auth-Code` header |
-| `POST /door/opened`, `/door/closed` | bench tests | only when `DOOR_TEST_ENDPOINTS=1` |
-| `GET /health` | ops | queue size, token count, last pull/flush, camera |
+| `POST /qr` | QR scanner | `{token}` → 200 opened / 403 denied or unknown scanner / 502 relay error |
+| `POST /facility/open` | Facility app | `{authCode, door}` or `X-Auth-Code` + `X-Door` headers; `door` = `male`/`female` |
+| `POST /door/opened?door=male`, `/door/closed?door=male` | bench tests | only when `DOOR_TEST_ENDPOINTS=1` |
+| `GET /health` | ops | queue size, token count, last pull/flush, per-door state, camera |
 
 5 denied unlocks from one IP within 60s → 429 for that IP.
 
