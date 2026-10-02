@@ -18,6 +18,18 @@ class ConfigError(RuntimeError):
     pass
 
 
+def load_env_file(path):
+    """Parse a systemd-style .env (KEY=VALUE lines, # comments) into a dict."""
+    env = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip()
+    return env
+
+
 def _env(name, default=None):
     value = os.environ.get(name)
     if value is None or value.strip() == "":

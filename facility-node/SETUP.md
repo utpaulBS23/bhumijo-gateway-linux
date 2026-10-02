@@ -202,25 +202,7 @@ curl "http://192.168.10.174/input_ctl.cgi?postpwd=<PASSWORD>"              # hol
 
 ## 5. Raspberry Pi OS
 
-1. In **Raspberry Pi Imager**: *Raspberry Pi OS Lite (64-bit)*. In the settings (gear icon):
-   - Hostname: `facility-<id>`
-   - Username: `pi`, with a strong password
-   - Enable SSH (public-key authentication preferred)
-   - Leave WiFi unset if the Pi is on Ethernet (recommended)
-2. Boot the Pi and connect it to the router.
-3. Static IP. Either reserve .104 at the router, or set it on the Pi:
-
-```bash
-sudo nmcli con mod "Wired connection 1" ipv4.method manual \
-  ipv4.addresses 192.168.10.104/24 ipv4.gateway 192.168.10.100 ipv4.dns 192.168.10.100
-sudo nmcli con up "Wired connection 1"
-```
-
-4. Update:
-
-```bash
-sudo apt update && sudo apt full-upgrade -y && sudo reboot
-```
+Follow **[INSTALL.md](INSTALL.md) sections 1–4**: flash Raspberry Pi OS Lite (64-bit), first login, static IP `192.168.10.104` (gateway `192.168.10.100`), OS update.
 
 ✅ **Check:** `ssh pi@192.168.10.104` works, and `ping -c1 192.168.10.174` gets a reply.
 
@@ -228,40 +210,11 @@ sudo apt update && sudo apt full-upgrade -y && sudo reboot
 
 ## 6. Install the node
 
-From your laptop, in the repo:
+Follow **[INSTALL.md](INSTALL.md) sections 5–10**: copy the code, `sudo bash deploy/install.sh`, `facility config`, `facility doctor`, reboot test.
 
-```bash
-scp -r facility-node pi@192.168.10.104:~
-ssh pi@192.168.10.104
-cd ~/facility-node && sudo bash deploy/install.sh
-```
-
-The installer handles:
-- packages (Python, gpiozero/lgpio, ffmpeg, i2c-tools)
-- the `facility` service user
-- the code in `/opt/facility-node`
-- enabling I2C
-- the firewall: SSH, plus 5454 from the LAN only
-- the hardware watchdog
-- the systemd service
-
-### 6.1 Configure
-
-```bash
-sudo nano /opt/facility-node/.env
-```
-
-Fill in every `CHANGE_ME` value and check the door section:
+Door settings for this site in `.env`:
 
 ```ini
-FACILITY_ID=<from admin backend>
-RELAY_URL=http://192.168.10.174
-RELAY_PWD=<board password from 4.3>
-ADMIN_URL=<backend URL>
-ADMIN_KEY=<backend key>
-CAM_HOST=192.168.10.180
-CAM_RTSP=rtsp://<user>:<pass>@192.168.10.180:554/stream1
-
 DOORS=male,female
 DOOR_MALE_RELAY=1
 DOOR_MALE_EXIT_INPUT=0
@@ -271,37 +224,11 @@ DOOR_FEMALE_RELAY=2
 DOOR_FEMALE_EXIT_INPUT=1
 DOOR_FEMALE_REED_GPIO=22
 DOOR_FEMALE_SCANNER_IPS=192.168.10.102
-
-REED=1          # 0 if the reed switches aren't fitted yet
+# 0 until the reed switches are fitted
+REED=1
 ```
 
-### 6.2 Test and start
-
-```bash
-cd /opt/facility-node
-sudo -u facility ./venv/bin/python test_door.py      # last line: OK
-sudo i2cdetect -y 1                                   # shows 38 and 53 (+ 48 if ADS1115 fitted)
-sudo systemctl start facility-node
-journalctl -u facility-node -f
-```
-
-In the log, look for:
-
-```
-door male: relay 1, exit input 0, reed GPIO 27, scanners 192.168.10.101
-door female: relay 2, exit input 1, reed GPIO 22, scanners 192.168.10.102
-token cache refreshed: N tokens
-```
-
-✅ **Check:**
-
-```bash
-curl -s http://192.168.10.104:5454/health
-```
-
-The response shows `"ok":true`, both doors, `tokens` > 0, and `auth_code_cached: true`.
-
-**Reboot once** (`sudo reboot`) to turn on the watchdog, then confirm the service comes back by itself.
+✅ **Check:** `facility doctor` shows both doors, `reachable, password accepted` for the relay, and `0 problem(s)`.
 
 ---
 
@@ -343,13 +270,10 @@ User QR codes come from the admin backend automatically. Use `qr_tool.py` for co
 Any valid code opens **either** door. Pi-made codes show up in the access log as `source: qr_local`.
 
 ```bash
-cd /opt/facility-node
-alias qr='sudo -u facility ./venv/bin/python qr_tool.py'
-
-qr create --label test                          # 1 code, valid 24 h
-qr create --label cleaners --count 5 --hours 720  # 5 codes, valid 30 days
-qr list
-qr revoke --label test                          # or --token <t> / --expired / --all
+facility qr create --label test                          # 1 code, valid 24 h
+facility qr create --label cleaners --count 5 --hours 720  # 5 codes, valid 30 days
+facility qr list
+facility qr revoke --label test                          # or --token <t> / --expired / --all
 ```
 
 Each code:
@@ -367,7 +291,7 @@ Each code:
 If you were given a QR image along with its token, register that exact token:
 
 ```bash
-qr create --label test --hours 24 --token <token>
+facility qr create --label test --hours 24 --token <token>
 ```
 
 ---
@@ -402,9 +326,10 @@ Codes made with `qr_tool.py` always open locally, in both modes.
 The repo ships a dummy validation server and test QR codes in `dev/`. Run the dummy on the Pi, in a second SSH session:
 
 ```bash
-cd /opt/facility-node   # copy dev/ there first: scp -r facility-node/dev pi@192.168.10.104:/opt/facility-node/
-./venv/bin/python dev/dummy_qr_api.py
+cd /opt/facility-node && sudo -u facility ./venv/bin/python dev/dummy_qr_api.py
 ```
+
+(The installer copies `dev/` to the Pi; the QR images are in `/opt/facility-node/dev/qr/`.)
 
 In `.env`, set the following and restart the service:
 
@@ -445,17 +370,16 @@ The dummy prints every request exactly as the Pi sends it, which is handy for ag
 
 ### Calibrate the MQ sensors (once, after burn-in)
 
-1. Set `MQ=1` in `.env` and restart the service.
+1. `facility config`, set `MQ=1`, save.
 2. Air the room out: door open, no people, no cleaning products for 30 min.
 3. Run:
 
 ```bash
-cd /opt/facility-node
-sudo -u facility ./venv/bin/python mq.py read          # Rs should be steady, not "no signal"
-sudo -u facility ./venv/bin/python mq.py calibrate     # samples for 3 min
+facility mq read          # Rs should be steady, not "no signal"
+facility mq calibrate     # samples for 3 min
 ```
 
-4. Paste the printed `MQ135_R0=` / `MQ136_R0=` lines into `.env`, then run `sudo systemctl restart facility-node`.
+4. `facility config`, paste the printed `MQ135_R0=` / `MQ136_R0=` lines, save (the service restarts).
 
 Until R0 is set, `nh3_ppm` and `h2s_ppm` stay `null`. Check `MQ_RL_KOHM` against the small resistor on the MQ board: `103` = 10 kΩ, `102` = 1 kΩ.
 
@@ -539,7 +463,7 @@ Run every test for **both doors**. Tick each column.
 | 11 | Power-cycle the Pi | Service auto-starts; queue survives | ☐ | ☐ |
 | 12 | Pi powered off, press exit button | Door still releases (hardware fail-safe) | ☐ | ☐ |
 
-Then **revoke the test codes**: `qr revoke --label test`.
+Then **revoke the test codes**: `facility qr revoke --label test`.
 
 ---
 

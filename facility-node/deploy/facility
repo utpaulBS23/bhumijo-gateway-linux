@@ -1,0 +1,50 @@
+#!/bin/bash
+# `facility` - everyday commands for the facility node. Installed to /usr/local/bin.
+set -euo pipefail
+
+DIR=/opt/facility-node
+PY="$DIR/venv/bin/python"
+SVC=facility-node
+as_facility() { cd "$DIR" && sudo -u facility "$PY" "$@"; }
+port() { sudo grep -E '^PORT=' "$DIR/.env" 2>/dev/null | cut -d= -f2 || true; }
+
+usage() {
+    cat <<USAGE
+facility <command>
+
+  status            service status
+  logs              follow the live log (Ctrl-C to stop)
+  health            node health as JSON (queue, tokens, doors, camera, odour)
+  doctor            check config, relay, camera, backend, sensors, service
+  start|stop|restart
+  config            edit /opt/facility-node/.env (restarts the service after)
+  test              run the test suite
+  qr <args>         unlock QR codes, e.g.  facility qr create --label test
+                                            facility qr list
+                                            facility qr revoke --label test
+  mq <args>         MQ gas sensors: facility mq read | facility mq calibrate
+  docs [name]       read the docs: readme | install | setup  (default: install)
+  version           installed version
+USAGE
+}
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+    status)  systemctl status "$SVC" --no-pager ;;
+    logs)    journalctl -u "$SVC" -f ;;
+    health)  p="$(port)"; curl -fsS "http://127.0.0.1:${p:-5454}/health" | python3 -m json.tool ;;
+    doctor)  as_facility doctor.py "$@" ;;
+    start|stop|restart) sudo systemctl "$cmd" "$SVC" && echo "facility-node: $cmd ok" ;;
+    config)  sudo nano "$DIR/.env" && sudo systemctl restart "$SVC" && echo "restarted" ;;
+    test)    as_facility test_door.py ;;
+    qr)      as_facility qr_tool.py "$@" ;;
+    mq)      as_facility mq.py "$@" ;;
+    docs)
+        case "${1:-install}" in
+            readme)  f=README.md ;; setup) f=SETUP.md ;; *) f=INSTALL.md ;;
+        esac
+        less "$DIR/docs/$f" ;;
+    version) cat "$DIR/VERSION" 2>/dev/null || echo unknown ;;
+    help|-h|--help) usage ;;
+    *) echo "unknown command: $cmd"; echo; usage; exit 1 ;;
+esac

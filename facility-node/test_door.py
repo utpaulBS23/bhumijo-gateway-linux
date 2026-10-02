@@ -1033,6 +1033,52 @@ class DummyApiTests(unittest.TestCase):
             self.assertEqual(v.check("DUMMY-DENY-0001", "male"), "deny")
 
 
+class DoctorTests(unittest.TestCase):
+    def run_config_check(self, text):
+        import contextlib
+        import io
+
+        import doctor
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, ".env")
+            with open(path, "w") as f:
+                f.write(text)
+            os.chmod(path, 0o640)
+            old = dict(os.environ)
+            r = doctor.Report()
+            out = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(out):
+                    s = doctor.check_config(r, path)
+            finally:
+                os.environ.clear()
+                os.environ.update(old)
+        return r, s, out.getvalue()
+
+    def test_good_env(self):
+        text = "".join(f"{k}={v}\n" for k, v in ENV.items())
+        r, s, out = self.run_config_check(text)
+        self.assertEqual((r.failed, s.facility_id), (0, "facility-001"))
+        self.assertIn("door main", out)
+
+    def test_change_me_and_invalid_reported(self):
+        text = "".join(f"{k}={v}\n" for k, v in ENV.items()).replace("admin-secret", "CHANGE_ME")
+        r, s, out = self.run_config_check(text)
+        self.assertIsNone(s)
+        self.assertIn("ADMIN_KEY", out)
+        self.assertGreaterEqual(r.failed, 2)
+
+    def test_missing_env(self):
+        import contextlib
+        import io
+
+        import doctor
+        r = doctor.Report()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(doctor.check_config(r, "/nonexistent/.env"))
+        self.assertEqual(r.failed, 1)
+
+
 class MiscTests(unittest.TestCase):
     def test_required_config(self):
         old = dict(os.environ)

@@ -29,6 +29,8 @@ import argparse
 import logging
 import time
 
+from config import load_env_file
+
 log = logging.getLogger("mq")
 
 ADS1115_CONVERSION = 0x00
@@ -129,17 +131,6 @@ class MQSensors:
 
 
 # ---- calibration CLI -----------------------------------------------------
-
-def load_env_file(path):
-    env = {}
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                env[k.strip()] = v.strip()
-    return env
-
 
 def _num(env, key, default, cast=float):
     v = env.get(key, "")
