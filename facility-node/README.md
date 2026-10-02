@@ -1,7 +1,7 @@
 # Facility Node
 
 Offline-first door, sensor and camera node for one Raspberry Pi 5 per facility.
-Replaces the legacy `gateway_service.py` (kept at the repo root until the switchover).
+Replaces the legacy `gateway_service.py` (removed; in git history at commit `e364645`).
 
 The internet is never in the unlock path. QR tokens and the Facility-app Auth Code
 are cached locally; all events go into a SQLite queue first and drain to the admin
