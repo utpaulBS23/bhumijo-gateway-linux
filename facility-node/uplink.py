@@ -47,6 +47,9 @@ class Uplink:
         self.last_pull_ok = None
         self.last_flush_ok = None
 
+    def auth_headers(self):
+        return self._headers()
+
     def _headers(self):
         key = self.s.admin_key
         if self.s.admin_auth_scheme:

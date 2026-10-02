@@ -869,6 +869,170 @@ class SnapshotUploadTests(unittest.TestCase):
         self.assertEqual(os.listdir(self.tmp.name), ["new.jpg"])
 
 
+class StubQRSession:
+    """Scripted QR API: reply(token) -> FakeResp, or raise for network errors."""
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.calls = []
+
+    def _do(self, method, url, data, headers, timeout):
+        self.calls.append((method, url, data, headers, timeout))
+        return self.reply(data)
+
+    def post(self, url, json=None, headers=None, timeout=None):
+        return self._do("POST", url, json, headers, timeout)
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        return self._do("GET", url, params, headers, timeout)
+
+
+def qr_settings(**kw):
+    env = {"QR_API_URL": "/qr/validate"}
+    env.update(kw.pop("env", {}))
+    return settings(env, **kw)
+
+
+class QRValidatorTests(unittest.TestCase):
+    def check(self, resp, **kw):
+        from qr_api import QRValidator
+        sess = StubQRSession(lambda d: resp() if callable(resp) else resp)
+        v = QRValidator(qr_settings(**kw), session=sess, auth_headers={"X": "k"})
+        return v.check("TOKEN-123", "male"), sess
+
+    def test_request_shape_post(self):
+        verdict, sess = self.check(FakeResp(200, {"allowed": True}))
+        self.assertEqual(verdict, "allow")
+        method, url, data, headers, timeout = sess.calls[0]
+        self.assertEqual((method, url), ("POST", "https://admin.test/api/qr/validate"))
+        self.assertEqual(data, {"token": "TOKEN-123", "facility": "facility-001", "door": "male"})
+        self.assertEqual((headers, timeout), ({"X": "k"}, 3.0))
+
+    def test_request_shape_get_custom_fields(self):
+        verdict, sess = self.check(FakeResp(200, {"data": {"access_granted": 1}}), env={
+            "QR_API_URL": "https://other.test/api/user/accesses", "QR_API_METHOD": "get",
+            "QR_API_TOKEN_FIELD": "card_id", "QR_API_FACILITY_FIELD": "",
+            "QR_API_DOOR_FIELD": "gender", "QR_API_EXTRA": '{"device_token": "d1"}',
+            "QR_API_ALLOW_FIELD": "data.access_granted"})
+        self.assertEqual(verdict, "allow")
+        method, url, data, _, _ = sess.calls[0]
+        self.assertEqual((method, url), ("GET", "https://other.test/api/user/accesses"))
+        self.assertEqual(data, {"card_id": "TOKEN-123", "gender": "male", "device_token": "d1"})
+
+    def test_allow_values(self):
+        for value, want in [(True, "allow"), ("granted", "allow"), ("YES", "allow"), (1, "allow"),
+                            (False, "deny"), ("denied", "deny"), (0, "deny"), (None, "deny")]:
+            self.assertEqual(self.check(FakeResp(200, {"allowed": value}))[0], want, value)
+
+    def test_status_codes(self):
+        self.assertEqual(self.check(FakeResp(403))[0], "deny")
+        self.assertEqual(self.check(FakeResp(404))[0], "deny")
+        self.assertEqual(self.check(FakeResp(500))[0], "unavailable")
+        self.assertEqual(self.check(FakeResp(401))[0], "unavailable", "our key is wrong, not the code")
+        self.assertEqual(self.check(FakeResp(200, None))[0], "unavailable", "non-JSON reply")
+
+    def test_network_error_unavailable(self):
+        def boom():
+            raise requests.Timeout("slow")
+        self.assertEqual(self.check(boom)[0], "unavailable")
+
+    def test_dig(self):
+        from qr_api import dig
+        self.assertEqual(dig({"a": {"b": [5, {"c": 1}]}}, "a.b.1.c"), 1)
+        self.assertIsNone(dig({"a": 1}, "a.b"))
+
+
+class QRApiDoorTests(unittest.TestCase):
+    """Door decisions with online validation in both orders."""
+
+    def door(self, verdicts, order="local_first"):
+        from qr_api import QRValidator
+        s = qr_settings(env={"QR_API_ORDER": order})
+        store = Store(":memory:")
+        store.replace_tokens([("cached", None)])
+        store.add_local_token("fn-pi-made-code-0001", "test", None)
+        replies = iter(verdicts)
+
+        def reply(data):
+            v = next(replies)
+            if v == "down":
+                raise requests.ConnectionError("down")
+            return FakeResp(200, {"allowed": v == "allow"})
+
+        sess = StubQRSession(reply)
+        relay, up = FakeRelay(), FakeUplink()
+        d = DoorController(s, MAIN, store, relay, up, spawn=lambda fn: fn(),
+                           qr_api=QRValidator(s, session=sess))
+        return d, relay, up, sess
+
+    def test_local_first_cached_token_skips_api(self):
+        d, relay, up, sess = self.door([])
+        self.assertEqual(d.qr("cached"), "opened")
+        self.assertEqual((sess.calls, up.of("door_event")[0]["source"]), ([], "qr"))
+
+    def test_local_first_unknown_token_asks_api(self):
+        d, relay, up, sess = self.door(["allow", "deny", "down"])
+        self.assertEqual(d.qr("new-ticket"), "opened")
+        self.assertEqual(up.of("door_event")[0]["source"], "qr_api")
+        self.assertEqual(d.qr("bad"), "denied")
+        self.assertEqual(d.qr("whatever"), "denied")
+        self.assertEqual([e.get("reason") for e in up.of("door_event")[1:]],
+                         ["api_denied", "unknown"])
+        self.assertEqual(relay.fired, [1])
+
+    def test_api_first_backend_deny_overrides_cache(self):
+        d, relay, up, _ = self.door(["deny"], order="api_first")
+        self.assertEqual(d.qr("cached"), "denied", "revoked on the backend")
+        self.assertEqual(relay.fired, [])
+
+    def test_api_first_falls_back_to_cache_when_down(self):
+        d, relay, up, _ = self.door(["down", "down"], order="api_first")
+        self.assertEqual(d.qr("cached"), "opened", "offline: cache still opens")
+        self.assertEqual(d.qr("unknown"), "denied")
+
+    def test_api_first_allow(self):
+        d, _, up, _ = self.door(["allow"], order="api_first")
+        self.assertEqual(d.qr("fresh"), "opened")
+        self.assertEqual(up.of("door_event")[0]["source"], "qr_api")
+
+    def test_pi_made_codes_never_hit_api(self):
+        for order in ("local_first", "api_first"):
+            d, _, up, sess = self.door([], order=order)
+            self.assertEqual(d.qr("fn-pi-made-code-0001"), "opened")
+            self.assertEqual(sess.calls, [])
+
+    def test_config_validation(self):
+        with self.assertRaises(ConfigError):
+            qr_settings(env={"QR_API_ORDER": "sometimes"})
+        with self.assertRaises(ConfigError):
+            qr_settings(env={"QR_API_EXTRA": "not json"})
+        with self.assertRaises(ConfigError):
+            qr_settings(env={"QR_API_METHOD": "PUT"})
+        self.assertEqual(settings().qr_api_url, "", "off by default")
+
+
+class DummyApiTests(unittest.TestCase):
+    def test_dummy_api_end_to_end(self):
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "dev"))
+        from dummy_qr_api import create_app as dummy_app
+        from qr_api import QRValidator
+        client = dummy_app().test_client()
+
+        class Bridge:   # route QRValidator's requests into the Flask test client
+            def post(self, url, json=None, headers=None, timeout=None):
+                r = client.post("/qr/validate", json=json)
+                return FakeResp(r.status_code, r.get_json())
+
+        s = qr_settings(env={"QR_API_URL": "http://127.0.0.1:8090/qr/validate"})
+        v = QRValidator(s, session=Bridge())
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(v.check("DUMMY-ALLOW-0001", "male"), "allow")
+            self.assertEqual(v.check("DUMMY-DENY-0001", "male"), "deny")
+
+
 class MiscTests(unittest.TestCase):
     def test_required_config(self):
         old = dict(os.environ)

@@ -76,7 +76,8 @@ class FailureLimiter:
             q.append(now)
 
 
-def create_app(settings, doors, store, uplink, camera=None, limiter=None, odour=None):
+def create_app(settings, doors, store, uplink, camera=None, limiter=None, odour=None,
+               qr_api=None):
     """doors: list of DoorController, one per section."""
     app = Flask(__name__)
     limiter = limiter or FailureLimiter()
@@ -184,6 +185,7 @@ def create_app(settings, doors, store, uplink, camera=None, limiter=None, odour=
             reed=settings.reed,
             camera=camera.snapshot_status() if camera else None,
             odour=odour.state() if odour else None,
+            qr_api=qr_api.state() if qr_api else None,
         )
 
     return app
@@ -198,6 +200,7 @@ def main():
     from relay import Relay
     from mq import MQSensors
     from odour import OdourMonitor
+    from qr_api import QRValidator
     from sensors_camera import Camera, Sensors, make_snapshotter, run_sensor_loop
     from store import Store
     from uplink import Uplink
@@ -212,7 +215,13 @@ def main():
     uplink = Uplink(s, store)
     camera = Camera(s)
     snapshot = make_snapshotter(camera, uplink)
-    doors = [DoorController(s, spec, store, relay, uplink, snapshot=snapshot)
+    qr_api = None
+    if s.qr_api_url:
+        qr_api = QRValidator(s, auth_headers=uplink.auth_headers() if s.qr_api_auth else {})
+        if any(h in s.qr_api_url for h in ("localhost", "127.0.0.1")):
+            log.warning("QR_API_URL points at this machine (%s): dummy API? "
+                        "Never leave this on in production", s.qr_api_url)
+    doors = [DoorController(s, spec, store, relay, uplink, snapshot=snapshot, qr_api=qr_api)
              for spec in s.doors]
     odour = OdourMonitor(s, uplink)
     mq = MQSensors(s) if s.mq else None
@@ -238,9 +247,11 @@ def main():
                  d.name, d.relay, d.exit_input, d.reed_gpio, ", ".join(d.scanner_ips) or "any")
     log.info("odour limits %s; MQ sensors %s; snapshot upload %s", odour.limits or "off",
              "on" if mq else "off", s.snapshot_upload_path or "off")
+    log.info("QR validation: %s", f"{s.qr_api_method} {s.qr_api_url} ({s.qr_api_order})"
+             if qr_api else "local cache only")
     log.info("facility node %s listening on %s:%d", s.facility_id, s.host, s.port)
     try:
-        create_app(s, doors, store, uplink, camera, odour=odour).run(
+        create_app(s, doors, store, uplink, camera, odour=odour, qr_api=qr_api).run(
             host=s.host, port=s.port, threaded=True)
     finally:
         stop.set()

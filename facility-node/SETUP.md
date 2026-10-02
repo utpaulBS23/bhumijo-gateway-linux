@@ -372,6 +372,61 @@ qr create --label test --hours 24 --token <token>
 
 ---
 
+## 8a. Online QR validation (optional)
+
+By default the Pi checks codes against the token list it pulls every 5 minutes. To also ask your backend live, for example for tickets bought a minute ago or for instant revocation, set `QR_API_*` in `.env`.
+
+### Match your backend's API
+
+| Your backend… | `.env` |
+|---|---|
+| URL | `QR_API_URL=/qr/validate` (under `ADMIN_URL`) or a full `https://…` URL |
+| Takes JSON POST / query GET | `QR_API_METHOD=POST` / `GET` |
+| Calls the code field `card_id` | `QR_API_TOKEN_FIELD=card_id` |
+| Doesn't want facility / door | `QR_API_FACILITY_FIELD=` / `QR_API_DOOR_FIELD=` |
+| Needs a fixed field | `QR_API_EXTRA={"device_token":"abc"}` |
+| Replies `{"data":{"access_granted":true}}` | `QR_API_ALLOW_FIELD=data.access_granted` |
+| Replies `{"status":"granted"}` | `QR_API_ALLOW_FIELD=status` (`granted` is already an allow value) |
+| Refuses with HTTP 403 | Already counted as "refused" (`QR_API_DENY_STATUS`) |
+| Has its own key, not the admin key | `QR_API_AUTH=0` and put the key in `QR_API_EXTRA` |
+
+### Pick the order
+
+- **`QR_API_ORDER=local_first`** (recommended): codes in the cache open instantly, and only unknown codes go to the API. With the internet down, every cached code still opens.
+- **`QR_API_ORDER=api_first`:** every scan asks the API first, and a "no" from the API beats the cache, so revocation takes effect immediately. If the API doesn't answer within `QR_API_TIMEOUT` (3 s), the cache decides. Each scan can wait up to that long.
+
+Codes made with `qr_tool.py` always open locally, in both modes.
+
+### Test it now with the dummy API
+
+The repo ships a dummy validation server and test QR codes in `dev/`. Run the dummy on the Pi, in a second SSH session:
+
+```bash
+cd /opt/facility-node   # copy dev/ there first: scp -r facility-node/dev pi@192.168.10.104:/opt/facility-node/
+./venv/bin/python dev/dummy_qr_api.py
+```
+
+In `.env`, set the following and restart the service:
+
+```ini
+QR_API_URL=http://127.0.0.1:8090/qr/validate
+QR_API_AUTH=0
+```
+
+Then show the codes at a scanner:
+
+| QR image (`dev/qr/`) | Expected |
+|---|---|
+| `DUMMY-ALLOW-0001.png` | Door opens; dummy prints `ALLOW`; log `source: qr_api` |
+| `DUMMY-DENY-0001.png` | Stays locked; dummy prints `DENY`; `reason: api_denied` |
+| Any of them, with the dummy stopped (Ctrl-C) | Stays locked; the log shows `QR API unavailable … using local cache` |
+
+The dummy prints every request exactly as the Pi sends it, which is handy for agreeing the format with your backend team.
+
+> ⚠️ **Remove the dummy before handover.** It approves well-known codes. Set `QR_API_URL` to the real backend (or leave it empty) and stop the dummy. The node logs a warning whenever `QR_API_URL` points at `127.0.0.1` or `localhost`.
+
+---
+
 ## 8b. Odour sensors and alert
 
 ### What's measured
@@ -510,6 +565,9 @@ Then **revoke the test codes**: `qr revoke --label test`.
 | Scan → `unknown scanner` | The scanner's IP isn't the one in `DOOR_*_SCANNER_IPS` (check the DHCP pool) |
 | Scan → nothing in the log | Wrong scanner URL or mode; try `curl -XPOST http://192.168.10.104:5454/qr -d test` from the LAN |
 | Valid QR denied | The code expired, or the token pull hasn't run (`/health` → `tokens`, `last_pull`) |
+| New tickets denied until the next pull | Turn on online validation (section 8a) |
+| `QR API unavailable` in the log | Wrong `QR_API_URL`, backend down, or a 401 (check `QR_API_AUTH` / the key). `/health` → `qr_api.last_error` |
+| API always denies | `QR_API_ALLOW_FIELD` doesn't match the reply. Run the dummy API to see the request, and compare with the backend's real reply |
 | Door doesn't open, log shows `relay failed … wrong relay password` | `RELAY_PWD` ≠ the board's `POST_PASSWORD` |
 | Door opens but no `exit` logged | `relay firmware does not report inputs` → firmware not flashed, wrong `PCF8574_INPUT_ADDR`, or polarity (section 4.5) |
 | Wrong door logs the exit | `DOOR_*_EXIT_INPUT` swapped |
@@ -535,5 +593,6 @@ Then **revoke the test codes**: `qr revoke --label test`.
 - [ ] `/opt/facility-node/.env` is `640 root:facility`
 - [ ] `DOOR_TEST_ENDPOINTS=0`
 - [ ] Test QR codes revoked (`qr list` shows none, or only staff codes with an expiry)
+- [ ] `QR_API_URL` is the real backend or empty, **not** the dummy (`127.0.0.1:8090`); the dummy is stopped
 - [ ] Remote access via Cloudflare Tunnel only
 - [ ] SD image backed up

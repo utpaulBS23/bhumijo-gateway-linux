@@ -56,6 +56,8 @@ sudo nmcli con mod "Wired connection 1" ipv4.method manual \
 | `inputs.py` | MC-38 reed (gpiozero + lgpio), exit-button poller |
 | `app.py` | Flask endpoints + background jobs |
 | `qr_tool.py` | Create / list / revoke unlock QR codes on the Pi |
+| `qr_api.py` | Configurable online QR validation (`QR_API_*`) with cache fallback |
+| `dev/` | Dummy QR validation API + dummy QR images, for testing only |
 | `test_door.py` | Test suite (no hardware needed) |
 | `firmware/kc868/main.py` | Patched relay firmware |
 | `deploy/` | systemd unit + installer |
@@ -95,6 +97,18 @@ sudo -u facility ./venv/bin/python qr_tool.py revoke --label test
 | Odour alert | Any metric ≥ its limit for `ODOUR_HOLD` → `odour_high` (`repeat:false`), then every `ODOUR_REPEAT` (`repeat:true`); below all limits for `ODOUR_CLEAR_HOLD` → `odour_resolved`. Alert payload includes `metrics` (which limits tripped) and `readings` |
 | Camera health | TCP probe every 30 s, frozen-frame check every 5 min; piggybacks the sensor push as `camera` |
 | Snapshots | On `forced_open` and the first `propped_open`. Uploaded (multipart) **before** its alert when `SNAPSHOT_UPLOAD_PATH` is set; alert's `snapshot` = file name. Kept `SNAPSHOT_KEEP_DAYS` on the Pi |
+
+## QR validation order
+
+| Code | `QR_API_URL` empty | `local_first` (default) | `api_first` |
+|---|---|---|---|
+| Pi-made (`qr_tool`) | local | local | local |
+| In backend cache | opens | opens, no API call | API decides; cache only if API down |
+| Not in cache | denied | API decides; denied if API down | API decides; denied if API down |
+
+Access-log `source`: `qr` (cache), `qr_api` (approved online), `qr_local` (Pi-made).
+Denials carry a `reason`: `unknown`, `api_denied` or `empty`.
+`/health` → `qr_api.last_ok` / `last_error` shows whether the API is answering.
 
 ## Facility-app auth
 

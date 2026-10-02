@@ -26,7 +26,7 @@ def iso(ts):
 
 class DoorController:
     def __init__(self, settings, door, store, relay, uplink, snapshot=None,
-                 clock=time.time, spawn=None):
+                 clock=time.time, spawn=None, qr_api=None):
         self.s = settings
         self.door = door            # config.DoorSpec
         self.name = door.name
@@ -34,6 +34,7 @@ class DoorController:
         self.relay = relay
         self.uplink = uplink
         self.snapshot = snapshot or (lambda: None)
+        self.qr_api = qr_api        # qr_api.QRValidator or None (cache only)
         self.clock = clock
         # Snapshots can take seconds; run alert work off the caller's thread
         self.spawn = spawn or (lambda fn: threading.Thread(target=fn, daemon=True).start())
@@ -79,14 +80,40 @@ class DoorController:
     # ---- unlock paths -----------------------------------------------------
 
     def qr(self, token):
-        """QR scanner. Returns 'opened' | 'denied' | 'relay_error'."""
+        """QR scanner. Returns 'opened' | 'denied' | 'relay_error'.
+
+        Sources in the access log: qr (cached backend token), qr_api (approved
+        online), qr_local (Pi-made code from qr_tool.py).
+        """
+        if not token:
+            return self._deny_qr("empty")
         kind = self.store.token_kind(token, self.clock())
-        if kind is None:
-            log.info("[%s] QR denied", self.name)
-            self._door_event("denied", source="qr")
-            return "denied"
-        # Pi-created codes are tagged so the access log separates them from users
-        return self._open("entry", "qr" if kind == "backend" else "qr_local")
+        if kind == "local":
+            # The Pi issued it; the backend doesn't know it
+            return self._open("entry", "qr_local")
+        if self.qr_api is None:
+            return self._open("entry", "qr") if kind else self._deny_qr("unknown")
+
+        if self.s.qr_api_order == "local_first":
+            if kind == "backend":
+                return self._open("entry", "qr")
+            verdict = self.qr_api.check(token, self.name)
+            if verdict == "allow":
+                return self._open("entry", "qr_api")
+            return self._deny_qr("api_denied" if verdict == "deny" else "unknown")
+
+        # api_first: the backend's answer wins; cache only if it can't answer
+        verdict = self.qr_api.check(token, self.name)
+        if verdict == "allow":
+            return self._open("entry", "qr_api")
+        if verdict == "deny":
+            return self._deny_qr("api_denied")
+        return self._open("entry", "qr") if kind else self._deny_qr("unknown")
+
+    def _deny_qr(self, reason):
+        log.info("[%s] QR denied (%s)", self.name, reason)
+        self._door_event("denied", source="qr", reason=reason)
+        return "denied"
 
     def facility_open(self, auth_code):
         """Facility app, authenticated by the per-facility Auth Code."""

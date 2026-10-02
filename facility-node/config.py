@@ -5,6 +5,7 @@ code image serves every site. Secrets have no defaults.
 """
 
 import ipaddress
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -51,6 +52,39 @@ def _optional_float(name):
     if value is None or value.lower() == "none":
         return None
     return float(value)
+
+
+DEFAULT_ALLOW_VALUES = "true,1,yes,granted,allow,allowed,success,ok"
+
+
+def _qr_api_url(admin_url):
+    """QR_API_URL as a full URL, or a path appended to ADMIN_URL. '' = off."""
+    raw = _env("QR_API_URL", "")
+    if not raw:
+        return ""
+    if raw.startswith(("http://", "https://")):
+        return raw
+    return admin_url + (raw if raw.startswith("/") else "/" + raw)
+
+
+def _qr_api_extra():
+    raw = _env("QR_API_EXTRA", "")
+    if not raw:
+        return {}
+    try:
+        extra = json.loads(raw)
+    except ValueError as e:
+        raise ConfigError(f"QR_API_EXTRA is not valid JSON: {e}")
+    if not isinstance(extra, dict):
+        raise ConfigError("QR_API_EXTRA must be a JSON object, e.g. {\"device\":\"pi-01\"}")
+    return extra
+
+
+def _choice(name, default, allowed):
+    value = _env(name, default).strip()
+    if value.lower() not in [a.lower() for a in allowed]:
+        raise ConfigError(f"{name}={value!r}; expected one of {', '.join(allowed)}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -149,6 +183,20 @@ class Settings:
     alert_path: str
     tokens_path: str
 
+    # Online QR validation (qr_api.py). qr_api_url "" = local cache only.
+    qr_api_url: str
+    qr_api_method: str
+    qr_api_order: str          # local_first | api_first
+    qr_api_timeout: float
+    qr_api_auth: bool          # send the admin auth header
+    qr_api_token_field: str
+    qr_api_facility_field: str
+    qr_api_door_field: str
+    qr_api_extra: dict
+    qr_api_allow_field: str
+    qr_api_allow_values: Tuple[str, ...]
+    qr_api_deny_status: Tuple[int, ...]
+
     # Camera
     cam_host: str
     cam_port: int
@@ -202,13 +250,14 @@ class Settings:
 
     @classmethod
     def from_env(cls):
+        admin_url = _required("ADMIN_URL").rstrip("/")
         return cls(
             facility_id=_required("FACILITY_ID"),
             relay_url=_required("RELAY_URL").rstrip("/"),
             relay_pwd=_required("RELAY_PWD"),
             doors=_parse_doors(),
             exit_poll_interval=_float("EXIT_POLL_INTERVAL", 0.2),
-            admin_url=_required("ADMIN_URL").rstrip("/"),
+            admin_url=admin_url,
             admin_key=_required("ADMIN_KEY"),
             admin_auth_header=_env("ADMIN_AUTH_HEADER", "Authorization"),
             admin_auth_scheme=_env("ADMIN_AUTH_SCHEME", "Bearer"),
@@ -216,6 +265,21 @@ class Settings:
             door_event_path=_env("DOOR_EVENT_PATH", "/facility/door-event"),
             alert_path=_env("ALERT_PATH", "/facility/alert"),
             tokens_path=_env("TOKENS_PATH", "/facility/tokens"),
+            qr_api_url=_qr_api_url(admin_url),
+            qr_api_method=_choice("QR_API_METHOD", "POST", ["POST", "GET"]).upper(),
+            qr_api_order=_choice("QR_API_ORDER", "local_first",
+                                 ["local_first", "api_first"]).lower(),
+            qr_api_timeout=_float("QR_API_TIMEOUT", 3.0),
+            qr_api_auth=_bool("QR_API_AUTH", True),
+            qr_api_token_field=_env("QR_API_TOKEN_FIELD", "token"),
+            qr_api_facility_field=os.environ.get("QR_API_FACILITY_FIELD", "facility").strip(),
+            qr_api_door_field=os.environ.get("QR_API_DOOR_FIELD", "door").strip(),
+            qr_api_extra=_qr_api_extra(),
+            qr_api_allow_field=_env("QR_API_ALLOW_FIELD", "allowed"),
+            qr_api_allow_values=tuple(v.strip().lower() for v in _env(
+                "QR_API_ALLOW_VALUES", DEFAULT_ALLOW_VALUES).split(",") if v.strip()),
+            qr_api_deny_status=tuple(int(c) for c in _env(
+                "QR_API_DENY_STATUS", "400,403,404,410,422").split(",") if c.strip()),
             cam_host=_env("CAM_HOST", ""),
             cam_port=_int("CAM_PORT", 554),
             cam_rtsp=_env("CAM_RTSP", ""),
