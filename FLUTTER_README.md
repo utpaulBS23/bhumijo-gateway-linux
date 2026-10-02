@@ -1,5 +1,19 @@
 # Flutter Manager App - Complete Implementation Guide
 
+> **Updated for the facility node** (`facility-node/`). The app is now the **Facility app**. It talks to the Pi at
+> `http://192.168.10.104:5454` with exactly two endpoints:
+>
+> | Endpoint | Body | Result |
+> |---|---|---|
+> | `POST /facility/open` | `{"authCode": "...", "door": "male" \| "female"}` | 200 opened · 403 wrong code · 400 unknown door · 429 too many tries · 502 relay error |
+> | `GET /health` | — | `doors.<name>.open`, queue, last sync |
+>
+> - **No lock action:** each door relocks by itself through its timer module.
+> - **Auth Code, not Facility ID:** the app authenticates with the per-facility Auth Code.
+> - **Removed endpoints:** `/relay/control`, `/relay/status` and `/manager` are gone.
+>
+> See `facility-node/SETUP.md` section 9.
+
 ## Project Overview
 
 Flutter application for managing door locks via Bhumijo Gateway Service. Provides lock/unlock control, user access management, and real-time status updates.
@@ -56,7 +70,7 @@ Follow FLUTTER_MANAGER_APP.md and create:
 ### 5. Configure Gateway Connection
 In main.dart:
 ```dart
-final gatewayService = GatewayService(baseUrl: 'http://192.168.1.100:5454');
+final gatewayService = GatewayService(baseUrl: 'http://192.168.10.104:5454', authCode: settings.authCode);
 ```
 
 ### 6. Run App
@@ -125,7 +139,7 @@ FLUTTER_UI_DESIGN.md
 ### Step 1: Setup DI (Dependency Injection)
 ```dart
 void main() {
-  final gatewayService = GatewayService(baseUrl: 'http://192.168.1.100:5454');
+  final gatewayService = GatewayService(baseUrl: 'http://192.168.10.104:5454', authCode: settings.authCode);
   final managerRepository = ManagerRepository(gatewayService: gatewayService);
   runApp(MyApp(managerRepository: managerRepository));
 }
@@ -148,13 +162,13 @@ Use widgets from FLUTTER_UI_DESIGN.md:
 ### Step 4: Handle Events
 ```dart
 // Lock
-context.read<ManagerBloc>().add(const LockRequested());
+// (no lock event: doors relock automatically)
 
 // Unlock
-context.read<ManagerBloc>().add(const UnlockRequested());
+context.read<ManagerBloc>().add(const UnlockRequested('male'));
 
 // Refresh Status
-context.read<ManagerBloc>().add(const StatusRefreshRequested());
+context.read<ManagerBloc>().add(const StatusRefreshRequested('male'));
 ```
 
 ## Gateway Integration Points
@@ -162,27 +176,21 @@ context.read<ManagerBloc>().add(const StatusRefreshRequested());
 ### API Endpoints Called
 
 ```
-POST /relay/control
-  └─ Lock/Unlock door
-  └─ Payload: {"relay": 1, "state": 0/1}
-
-GET /relay/status
-  └─ Get current lock status
-  └─ Response: {"relays": {"1": true/false}}
-
-POST /manager
-  └─ Log manager events
-  └─ Payload: {"card_id", "gender", "button_id"}
+POST /facility/open
+  └─ Unlock one door (relocks automatically)
+  └─ Payload: {"authCode": "<facility auth code>", "door": "male" | "female"}
+  └─ 200 opened · 403 wrong code · 400 unknown door · 429 too many tries
 
 GET /health
-  └─ Check gateway availability
+  └─ Node availability + per-door state
+  └─ Response: {"doors": {"male": {"open": false}, "female": {"open": false}}, ...}
 ```
 
 ### Network Configuration
 
 ```dart
 Dio _dio = Dio(BaseOptions(
-  baseUrl: 'http://192.168.1.100:5454',
+  baseUrl: 'http://192.168.10.104:5454',
   connectTimeout: Duration(seconds: 10),
   receiveTimeout: Duration(seconds: 10),
 ));
@@ -229,7 +237,7 @@ void main() {
     test('emits correct state on unlock', () async {
       when(mockRepository.unlock()).thenAnswer((_) async => true);
       
-      managerBloc.add(const UnlockRequested());
+      managerBloc.add(const UnlockRequested('male'));
       
       await expectLater(
         managerBloc.stream,
@@ -257,10 +265,10 @@ void main() {
 ### Gateway Not Connecting
 ```bash
 # Check gateway running
-curl http://192.168.1.100:5454/health
+curl http://192.168.10.104:5454/health
 
 # Verify network
-adb shell ping 192.168.1.100
+adb shell ping 192.168.10.104
 
 # Check logs
 flutter logs | grep "GatewayService"
@@ -376,7 +384,7 @@ Check pubspec.yaml for latest versions.
 
 2. Test gateway:
    ```bash
-   curl http://192.168.1.100:5454/health
+   curl http://192.168.10.104:5454/health
    ```
 
 3. Debug BLoC:
@@ -387,7 +395,7 @@ Check pubspec.yaml for latest versions.
 
 4. Check network:
    ```bash
-   adb shell ping 192.168.1.100
+   adb shell ping 192.168.10.104
    ```
 
 ## Next Steps

@@ -7,6 +7,8 @@ The internet is never in the unlock path. QR tokens and the Facility-app Auth Co
 are cached locally; all events go into a SQLite queue first and drain to the admin
 backend when it's reachable.
 
+**→ Field installation: [SETUP.md](SETUP.md)** (wiring, firmware, Pi, scanners, QR codes, commissioning)
+
 ## Network and doors
 
 Static IPs (reserved at the router, **outside the DHCP pool**):
@@ -51,6 +53,7 @@ sudo nmcli con mod "Wired connection 1" ipv4.method manual \
 | `sensors_camera.py` | ENS160 + AHT20 (smbus2), camera probe / frame check / snapshot |
 | `inputs.py` | MC-38 reed (gpiozero + lgpio), exit-button poller |
 | `app.py` | Flask endpoints + background jobs |
+| `qr_tool.py` | Create / list / revoke unlock QR codes on the Pi |
 | `test_door.py` | Test suite (no hardware needed) |
 | `firmware/kc868/main.py` | Patched relay firmware |
 | `deploy/` | systemd unit + installer |
@@ -59,12 +62,28 @@ sudo nmcli con mod "Wired connection 1" ipv4.method manual \
 
 | Method + path | Caller | Body |
 |---|---|---|
-| `POST /qr` | QR scanner | `{token}` → 200 opened / 403 denied or unknown scanner / 502 relay error |
+| `POST /qr` | QR scanner | `{token}`, form field, or plain-text body → 200 opened / 403 denied or unknown scanner / 502 relay error |
+| `GET\|POST /qrscanner` | legacy-format scanner | `?cardid=` → `{status, access_granted}` (always 200) |
+| `POST /rakindaqrscanner` | Rakinda scanner | `{SCode}` → `{ResultCode: "1"\|"0"}` |
 | `POST /facility/open` | Facility app | `{authCode, door}` or `X-Auth-Code` + `X-Door` headers; `door` = `male`/`female` |
 | `POST /door/opened?door=male`, `/door/closed?door=male` | bench tests | only when `DOOR_TEST_ENDPOINTS=1` |
 | `GET /health` | ops | queue size, token count, last pull/flush, per-door state, camera |
 
 5 denied unlocks from one IP within 60s → 429 for that IP.
+
+All three scan routes do the same thing: route the scan to a door by scanner IP, then check the code.
+
+## Unlock QR codes
+
+Backend tokens are pulled every 5 min. Codes for testing or staff are made on the Pi
+with `qr_tool.py`. They're kept in a separate table, so the pull never removes them,
+and they're logged as `source: qr_local`. They expire after 24 h by default.
+
+```bash
+sudo -u facility ./venv/bin/python qr_tool.py create --label test
+sudo -u facility ./venv/bin/python qr_tool.py list
+sudo -u facility ./venv/bin/python qr_tool.py revoke --label test
+```
 
 ## Facility-app auth
 

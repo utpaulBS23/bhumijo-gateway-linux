@@ -1,5 +1,9 @@
 # Quick Start
 
+> **Legacy gateway.** This document covers `gateway_service.py`, the old single-door, online-only gateway.
+> It stays here only until the switchover. **New installs use the facility node:** see
+> [`facility-node/SETUP.md`](facility-node/SETUP.md).
+
 ## Bare Metal (Ubuntu/Debian)
 
 ```bash

@@ -1,4 +1,30 @@
-# Bhumijo Gateway Service (Linux)
+# Bhumijo Facility System
+
+| Folder / file | What it is |
+|---|---|
+| **[`facility-node/`](facility-node/)** | **Current system.** Offline-first node for one Raspberry Pi 5 per facility: two doors (male/female), QR + Facility-app unlock, exit tracking, reed alerts, sensors, camera health. **Setup: [`facility-node/SETUP.md`](facility-node/SETUP.md)** |
+| `facility-node/firmware/kc868/` | Patched KC868-A4S relay firmware (required by the node) |
+| `gateway_service.py`, `gateway_admin.py`, `install.sh`, `gateway.conf`, Docker files | Legacy single-door gateway, kept until the switchover |
+| `FLUTTER_*.md` | Facility (attendant) app design, updated for the node's `POST /facility/open` |
+
+### Facility network (per site)
+
+| Device | IP |
+|---|---|
+| Router | 192.168.10.100 |
+| QR scanner, male / female | 192.168.10.101 / .102 |
+| Raspberry Pi 5 (facility node) | 192.168.10.104:5454 |
+| KC868-A4S relay | 192.168.10.174 |
+| IP camera | 192.168.10.180 |
+
+---
+
+## Legacy: Bhumijo Gateway Service (Linux)
+
+> **Legacy gateway.** This section covers `gateway_service.py`, the old single-door, online-only gateway.
+> It stays here only until the switchover. **New installs use the facility node:** see
+> [`facility-node/SETUP.md`](facility-node/SETUP.md).
+
 
 Linux implementation of Bhumijo Gateway. Runs as systemd service, controls KC868-A4S relay, exposes HTTP API for QR scanners, WiFi buttons, and environmental sensors.
 

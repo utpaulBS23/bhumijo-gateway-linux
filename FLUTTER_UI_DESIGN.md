@@ -1,5 +1,13 @@
 # Flutter Manager App - UI Design Guide
 
+> **Updated for the facility node.** The facility has **two doors (Male, Female)**, so show one **Unlock** button per door.
+> There's no Lock button: each door relocks by itself through its timer. Show the door's open/closed state from `GET /health`.
+> Error messages to design for:
+> - wrong Auth Code (403)
+> - too many attempts, wait a minute (429)
+> - door controller offline (502)
+> - Pi unreachable (timeout)
+
 ## Lock/Unlock Screen Design
 
 ### Layout Structure

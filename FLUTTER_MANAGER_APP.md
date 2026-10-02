@@ -1,5 +1,19 @@
 # Flutter Manager App - Lock/Unlock Implementation
 
+> **Updated for the facility node** (`facility-node/`). The app is now the **Facility app**. It talks to the Pi at
+> `http://192.168.10.104:5454` with exactly two endpoints:
+>
+> | Endpoint | Body | Result |
+> |---|---|---|
+> | `POST /facility/open` | `{"authCode": "...", "door": "male" \| "female"}` | 200 opened · 403 wrong code · 400 unknown door · 429 too many tries · 502 relay error |
+> | `GET /health` | — | `doors.<name>.open`, queue, last sync |
+>
+> - **No lock action:** each door relocks by itself through its timer module.
+> - **Auth Code, not Facility ID:** the app authenticates with the per-facility Auth Code.
+> - **Removed endpoints:** `/relay/control`, `/relay/status` and `/manager` are gone.
+>
+> See `facility-node/SETUP.md` section 9.
+
 ## Overview
 
 Flutter application for managing gateway access control. Features lock/unlock, relay control, QR scanning, user access management, real-time status.
@@ -35,16 +49,14 @@ Flutter application for managing gateway access control. Features lock/unlock, r
 ┌─────────────────────────────┐
 │  API Layer (Dio/Http)       │
 ├─────────────────────────────┤
-│ POST /relay/control         │
-│ POST /manager               │
-│ GET  /relay/status          │
-│ POST /user/access           │
+│ POST /facility/open         │
+│ GET  /health                │
 └─────────────────────────────┘
             │
             ▼
 ┌─────────────────────────────┐
-│  Linux Gateway Service      │
-│  (Port 5454)                │
+│  Facility Node (Pi 5)       │
+│  192.168.10.104:5454        │
 └─────────────────────────────┘
             │
             ▼
@@ -307,11 +319,14 @@ class UserAccess extends Equatable {
 import 'package:dio/dio.dart';
 import '../models/relay_model.dart';
 
+enum UnlockResult { opened, wrongAuthCode, unknownDoor, tooManyAttempts, relayError }
+
 class GatewayService {
   late Dio _dio;
   final String baseUrl;
+  final String authCode;   // per-facility Auth Code (NOT the Facility ID)
 
-  GatewayService({required this.baseUrl}) {
+  GatewayService({required this.baseUrl, required this.authCode}) {
     _dio = Dio(BaseOptions(
       baseUrl: baseUrl,
       connectTimeout: Duration(seconds: 10),
@@ -319,89 +334,37 @@ class GatewayService {
       headers: {
         'Content-Type': 'application/json',
       },
+      // Let 4xx/5xx through so we can map them to messages below
+      validateStatus: (_) => true,
     ));
-    
+
     _dio.interceptors.add(LogInterceptor());
   }
 
-  // Lock/Unlock
-  Future<bool> controlLock(int relayNumber, bool unlock) async {
+  /// Unlock one door ("male" / "female"). The door relocks by itself.
+  Future<UnlockResult> unlockDoor(String door) async {
     try {
       final response = await _dio.post(
-        '/relay/control',
-        data: {
-          'relay': relayNumber,
-          'state': unlock ? 1 : 0,
-          'duration': 3600,
-        },
+        '/facility/open',
+        data: {'authCode': authCode, 'door': door},
       );
-      return response.statusCode == 200;
+      switch (response.statusCode) {
+        case 200: return UnlockResult.opened;
+        case 403: return UnlockResult.wrongAuthCode;
+        case 400: return UnlockResult.unknownDoor;
+        case 429: return UnlockResult.tooManyAttempts;
+        default:  return UnlockResult.relayError;
+      }
     } on DioException catch (e) {
       throw _handleError(e);
     }
   }
 
-  // Get relay status
-  Future<RelayStatus> getRelayStatus(int relayNumber) async {
-    try {
-      final response = await _dio.get('/relay/status');
-      final data = response.data;
-      
-      final isOn = data['relays'][relayNumber.toString()] == true;
-      return RelayStatus(
-        relayNumber: relayNumber,
-        isOn: isOn,
-        lastUpdated: DateTime.now(),
-        name: 'Door Lock',
-      );
-    } on DioException catch (e) {
-      throw _handleError(e);
-    }
-  }
-
-  // Manager event
-  Future<bool> postManagerEvent({
-    required String cardId,
-    required String gender,
-    required int buttonId,
-  }) async {
-    try {
-      final response = await _dio.post(
-        '/manager',
-        data: {
-          'card_id': cardId,
-          'gender': gender,
-          'button_id': buttonId,
-        },
-      );
-      return response.statusCode == 200;
-    } on DioException catch (e) {
-      throw _handleError(e);
-    }
-  }
-
-  // QR Scan
-  Future<bool> handleQRScan({
-    required String cardId,
-    required String cjihao,
-    required int mjihao,
-    required int status,
-  }) async {
-    try {
-      final response = await _dio.post(
-        '/qrscanner',
-        data: {
-          'cardid': cardId,
-          'cjihao': cjihao,
-          'mjihao': mjihao,
-          'status': status,
-          'time': DateTime.now().toIso8601String(),
-        },
-      );
-      return response.statusCode == 200;
-    } on DioException catch (e) {
-      throw _handleError(e);
-    }
+  /// Per-door open/closed state from the node's /health.
+  Future<Map<String, bool>> doorStates() async {
+    final response = await _dio.get('/health');
+    final doors = (response.data['doors'] as Map<String, dynamic>);
+    return doors.map((name, d) => MapEntry(name, d['open'] == true));
   }
 
   // Health check
@@ -415,6 +378,7 @@ class GatewayService {
   }
 
   String _handleError(DioException e) {
+    // Network-level errors only; HTTP status codes are handled in unlockDoor
     if (e.type == DioExceptionType.connectionTimeout) {
       return 'Connection timeout';
     } else if (e.type == DioExceptionType.receiveTimeout) {
@@ -442,25 +406,21 @@ abstract class ManagerEvent extends Equatable {
   const ManagerEvent();
 }
 
-class LockRequested extends ManagerEvent {
-  const LockRequested();
-
-  @override
-  List<Object?> get props => [];
-}
-
+// No LockRequested: doors relock automatically via their timer modules.
 class UnlockRequested extends ManagerEvent {
-  const UnlockRequested();
+  final String door;   // "male" | "female"
+  const UnlockRequested(this.door);
 
   @override
-  List<Object?> get props => [];
+  List<Object?> get props => [door];
 }
 
 class StatusRefreshRequested extends ManagerEvent {
-  const StatusRefreshRequested();
+  final String door;
+  const StatusRefreshRequested(this.door);
 
   @override
-  List<Object?> get props => [];
+  List<Object?> get props => [door];
 }
 
 // States
@@ -506,30 +466,8 @@ class ManagerBloc extends Bloc<ManagerEvent, ManagerState> {
   LockState currentLockState = const LockState(status: LockStatus.locked);
 
   ManagerBloc({required this.repository}) : super(const ManagerInitial()) {
-    on<LockRequested>(_onLockRequested);
     on<UnlockRequested>(_onUnlockRequested);
     on<StatusRefreshRequested>(_onStatusRefreshRequested);
-  }
-
-  Future<void> _onLockRequested(
-    LockRequested event,
-    Emitter<ManagerState> emit,
-  ) async {
-    emit(const ManagerLoading());
-    try {
-      final success = await repository.lock();
-      if (success) {
-        currentLockState = currentLockState.copyWith(
-          status: LockStatus.locked,
-          lastChanged: DateTime.now(),
-        );
-        emit(LockStateChanged(currentLockState));
-      } else {
-        emit(const ManagerError('Failed to lock'));
-      }
-    } catch (e) {
-      emit(ManagerError(e.toString()));
-    }
   }
 
   Future<void> _onUnlockRequested(
@@ -538,15 +476,22 @@ class ManagerBloc extends Bloc<ManagerEvent, ManagerState> {
   ) async {
     emit(const ManagerLoading());
     try {
-      final success = await repository.unlock();
-      if (success) {
-        currentLockState = currentLockState.copyWith(
-          status: LockStatus.unlocked,
-          lastChanged: DateTime.now(),
-        );
-        emit(LockStateChanged(currentLockState));
-      } else {
-        emit(const ManagerError('Failed to unlock'));
+      final result = await repository.unlock(event.door);
+      switch (result) {
+        case UnlockResult.opened:
+          currentLockState = currentLockState.copyWith(
+            status: LockStatus.unlocked,
+            lastChanged: DateTime.now(),
+          );
+          emit(LockStateChanged(currentLockState));
+        case UnlockResult.wrongAuthCode:
+          emit(const ManagerError('Wrong Auth Code - check app settings'));
+        case UnlockResult.tooManyAttempts:
+          emit(const ManagerError('Too many attempts - wait a minute'));
+        case UnlockResult.unknownDoor:
+          emit(const ManagerError('Unknown door'));
+        case UnlockResult.relayError:
+          emit(const ManagerError('Door controller offline'));
       }
     } catch (e) {
       emit(ManagerError(e.toString()));
@@ -558,7 +503,7 @@ class ManagerBloc extends Bloc<ManagerEvent, ManagerState> {
     Emitter<ManagerState> emit,
   ) async {
     try {
-      final status = await repository.getStatus();
+      final status = await repository.getStatus(event.door);
       emit(LockStateChanged(status));
     } catch (e) {
       emit(ManagerError(e.toString()));
@@ -578,21 +523,17 @@ class ManagerRepository {
 
   ManagerRepository({required this.gatewayService});
 
-  Future<bool> lock() async {
-    return await gatewayService.controlLock(1, false);
+  // No lock(): the timer module relocks each door automatically.
+  Future<UnlockResult> unlock(String door) async {
+    return await gatewayService.unlockDoor(door);   // "male" / "female"
   }
 
-  Future<bool> unlock() async {
-    return await gatewayService.controlLock(1, true);
-  }
-
-  Future<LockState> getStatus() async {
+  Future<LockState> getStatus(String door) async {
     try {
-      final relay = await gatewayService.getRelayStatus(1);
+      final states = await gatewayService.doorStates();
       return LockState(
-        status: relay.isOn ? LockStatus.unlocked : LockStatus.locked,
-        lastChanged: relay.lastUpdated,
-        relayNumber: 1,
+        status: states[door] == true ? LockStatus.unlocked : LockStatus.locked,
+        lastChanged: DateTime.now(),
       );
     } catch (e) {
       return const LockState(
@@ -626,7 +567,7 @@ class _LockUnlockScreenState extends State<LockUnlockScreen> {
   @override
   void initState() {
     super.initState();
-    context.read<ManagerBloc>().add(const StatusRefreshRequested());
+    context.read<ManagerBloc>().add(const StatusRefreshRequested('male'));
   }
 
   @override
@@ -729,38 +670,27 @@ class _LockUnlockScreenState extends State<LockUnlockScreen> {
 
   Widget _buildControlButtons(BuildContext context, ManagerState state) {
     final isLoading = state is ManagerLoading;
-    final isLocked = state is LockStateChanged && state.lockState.isLocked;
 
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        // Lock Button
-        ElevatedButton.icon(
-          onPressed: isLoading || isLocked
+    // One unlock button per door; doors relock by themselves
+    Widget unlockButton(String door, String label) => ElevatedButton.icon(
+          onPressed: isLoading
               ? null
-              : () => context.read<ManagerBloc>().add(const LockRequested()),
-          icon: const Icon(Icons.lock),
-          label: const Text('LOCK'),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.red,
-            disabledBackgroundColor: Colors.grey,
-            padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 15),
-          ),
-        ),
-        const SizedBox(width: 20),
-        // Unlock Button
-        ElevatedButton.icon(
-          onPressed: isLoading || !isLocked
-              ? null
-              : () => context.read<ManagerBloc>().add(const UnlockRequested()),
+              : () => context.read<ManagerBloc>().add(UnlockRequested(door)),
           icon: const Icon(Icons.lock_open),
-          label: const Text('UNLOCK'),
+          label: Text(label),
           style: ElevatedButton.styleFrom(
             backgroundColor: Colors.green,
             disabledBackgroundColor: Colors.grey,
             padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 15),
           ),
-        ),
+        );
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        unlockButton('male', 'UNLOCK MALE'),
+        const SizedBox(width: 20),
+        unlockButton('female', 'UNLOCK FEMALE'),
       ],
     );
   }
@@ -786,7 +716,7 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
   // Initialize services
-  final gatewayService = GatewayService(baseUrl: 'http://192.168.1.100:5454');
+  final gatewayService = GatewayService(baseUrl: 'http://192.168.10.104:5454', authCode: settings.authCode);
   final managerRepository = ManagerRepository(gatewayService: gatewayService);
   
   runApp(MyApp(managerRepository: managerRepository));
@@ -834,7 +764,7 @@ ChangeNotifierProvider(
 ```dart
 // Periodic status check
 Timer.periodic(Duration(seconds: 5), (_) {
-  context.read<ManagerBloc>().add(const StatusRefreshRequested());
+  context.read<ManagerBloc>().add(const StatusRefreshRequested('male'));
 });
 ```
 
@@ -862,18 +792,15 @@ Timer.periodic(Duration(seconds: 5), (_) {
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/relay/control` | POST | Control lock (lock/unlock) |
-| `/relay/status` | GET | Get current relay status |
-| `/manager` | POST | Send manager events |
-| `/qrscanner` | POST | Process QR scan |
-| `/health` | GET | Check gateway health |
+| `/facility/open` | POST | Unlock a door: `{authCode, door}` |
+| `/health` | GET | Node health + per-door open state |
 
 ## Error Handling
 
 ```dart
 // Network errors
 try {
-  await gatewayService.controlLock(1, true);
+  await gatewayService.unlockDoor('male');
 } on DioException catch (e) {
   if (e.type == DioExceptionType.connectionTimeout) {
     showError('Connection timeout');
@@ -903,9 +830,9 @@ void main() {
     });
 
     test('unlock sets correct lock state', () async {
-      when(mockRepository.unlock()).thenAnswer((_) async => true);
+      when(mockRepository.unlock('male')).thenAnswer((_) async => UnlockResult.opened);
       
-      managerBloc.add(const UnlockRequested());
+      managerBloc.add(const UnlockRequested('male'));
       
       await expectLater(
         managerBloc.stream,
@@ -946,9 +873,10 @@ flutter build ios --release
 ### gateway_config.dart
 ```dart
 class GatewayConfig {
-  static const String gatewayUrl = '192.168.1.100';
+  static const String gatewayUrl = '192.168.10.104';   // facility Pi
   static const int gatewayPort = 5454;
-  static const int relayNumber = 1;
+  static const List<String> doors = ['male', 'female'];
+  // Auth Code comes from app settings (per facility), never hard-coded
   static const String appVersion = '1.0.0';
 }
 ```
@@ -974,10 +902,10 @@ class GatewayConfig {
 **Gateway not connecting:**
 ```bash
 # Check gateway running
-curl http://192.168.1.100:5454/health
+curl http://192.168.10.104:5454/health
 
 # Check network connectivity
-adb shell ping 192.168.1.100
+adb shell ping 192.168.10.104
 ```
 
 **UI not updating:**

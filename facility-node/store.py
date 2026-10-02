@@ -16,6 +16,14 @@ CREATE TABLE IF NOT EXISTS tokens (
     token      TEXT PRIMARY KEY,
     expires_at REAL            -- unix seconds; NULL = no expiry
 );
+-- Codes created on the Pi (qr_tool.py): test / commissioning / staff QRs.
+-- Separate table so the backend pull never overwrites them.
+CREATE TABLE IF NOT EXISTS local_tokens (
+    token      TEXT PRIMARY KEY,
+    label      TEXT NOT NULL,
+    expires_at REAL,           -- unix seconds; NULL = no expiry
+    created    REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS creds (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -65,17 +73,54 @@ class Store:
                 self._db.execute("ROLLBACK")
                 raise
 
-    def token_valid(self, token, now=None):
+    def token_kind(self, token, now=None):
+        """'backend' | 'local' if the token is valid now, else None."""
         if not token:
-            return False
+            return None
         now = time.time() if now is None else now
         with self._lock:
-            row = self._db.execute(
-                "SELECT expires_at FROM tokens WHERE token = ?", (token,)).fetchone()
-        if row is None:
-            return False
-        expires_at = row[0]
-        return expires_at is None or expires_at > now
+            for kind, table in (("backend", "tokens"), ("local", "local_tokens")):
+                row = self._db.execute(
+                    f"SELECT expires_at FROM {table} WHERE token = ?", (token,)).fetchone()
+                if row is not None and (row[0] is None or row[0] > now):
+                    return kind
+        return None
+
+    def token_valid(self, token, now=None):
+        return self.token_kind(token, now) is not None
+
+    # ---- local tokens (qr_tool.py) --------------------------------------
+
+    def add_local_token(self, token, label, expires_at, now=None):
+        now = time.time() if now is None else now
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO local_tokens (token, label, expires_at, created) "
+                "VALUES (?, ?, ?, ?)", (token, label, expires_at, now))
+
+    def list_local_tokens(self):
+        """[(token, label, expires_at, created)] newest first."""
+        with self._lock:
+            return self._db.execute(
+                "SELECT token, label, expires_at, created FROM local_tokens "
+                "ORDER BY created DESC").fetchall()
+
+    def revoke_local_tokens(self, token=None, label=None, everything=False, expired_before=None):
+        """Delete by token, by label, expired ones, or all. Returns rows removed."""
+        with self._lock:
+            if everything:
+                cur = self._db.execute("DELETE FROM local_tokens")
+            elif token:
+                cur = self._db.execute("DELETE FROM local_tokens WHERE token = ?", (token,))
+            elif label:
+                cur = self._db.execute("DELETE FROM local_tokens WHERE label = ?", (label,))
+            elif expired_before is not None:
+                cur = self._db.execute(
+                    "DELETE FROM local_tokens WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                    (expired_before,))
+            else:
+                return 0
+            return cur.rowcount
 
     def token_count(self):
         with self._lock:

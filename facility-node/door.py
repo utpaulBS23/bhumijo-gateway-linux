@@ -80,11 +80,13 @@ class DoorController:
 
     def qr(self, token):
         """QR scanner. Returns 'opened' | 'denied' | 'relay_error'."""
-        if not self.store.token_valid(token, self.clock()):
+        kind = self.store.token_kind(token, self.clock())
+        if kind is None:
             log.info("[%s] QR denied", self.name)
             self._door_event("denied", source="qr")
             return "denied"
-        return self._open("entry", "qr")
+        # Pi-created codes are tagged so the access log separates them from users
+        return self._open("entry", "qr" if kind == "backend" else "qr_local")
 
     def facility_open(self, auth_code):
         """Facility app, authenticated by the per-facility Auth Code."""

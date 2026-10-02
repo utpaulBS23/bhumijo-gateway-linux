@@ -529,6 +529,111 @@ class TwoDoorTests(unittest.TestCase):
         self.assertEqual(h["doors"]["female"]["scanners"], ["192.168.10.102"])
 
 
+class ScannerFormatTests(unittest.TestCase):
+    """Every known scanner format reaches the same token check."""
+
+    def setUp(self):
+        self.doors, self.relay, self.up, _, self.store = make_doors(TWO_DOORS)
+        uplink = Uplink(self.doors[0].s, self.store, session=FakeSession())
+        self.c = create_app(self.doors[0].s, self.doors, self.store, uplink).test_client()
+        self.env = {"REMOTE_ADDR": "192.168.10.102"}
+
+    def test_json_token(self):
+        r = self.c.post("/qr", json={"token": "good"}, environ_base=self.env)
+        self.assertEqual(r.status_code, 200)
+
+    def test_plain_text_body(self):
+        r = self.c.post("/qr", data="good\r\n", content_type="text/plain", environ_base=self.env)
+        self.assertEqual(r.status_code, 200)
+
+    def test_form_field(self):
+        r = self.c.post("/qr", data={"code": "good"}, environ_base=self.env)
+        self.assertEqual(r.status_code, 200)
+
+    def test_legacy_qrscanner_get(self):
+        r = self.c.get("/qrscanner?cardid=good&cjihao=X&mjihao=1&status=1", environ_base=self.env)
+        self.assertEqual((r.json["status"], r.json["access_granted"]), ("success", True))
+        r = self.c.get("/qrscanner?cardid=bad", environ_base=self.env)
+        self.assertEqual((r.status_code, r.json["access_granted"]), (200, False))
+
+    def test_rakinda(self):
+        r = self.c.post("/rakindaqrscanner", json={"SCode": "good"}, environ_base=self.env)
+        self.assertEqual(r.json["ResultCode"], "1")
+        r = self.c.post("/rakindaqrscanner", json={"SCode": "bad"}, environ_base=self.env)
+        self.assertEqual(r.json["ResultCode"], "0")
+        self.assertEqual(self.relay.fired, [2])
+
+    def test_compat_routes_still_route_by_scanner_ip(self):
+        r = self.c.post("/rakindaqrscanner", json={"SCode": "good"},
+                        environ_base={"REMOTE_ADDR": "10.9.9.9"})
+        self.assertEqual(r.json["ResultCode"], "0")
+        self.assertEqual(self.relay.fired, [])
+
+    def test_empty_scan_denied(self):
+        r = self.c.post("/qr", data="", environ_base=self.env)
+        self.assertEqual(r.status_code, 403)
+
+
+class LocalCodeTests(unittest.TestCase):
+    def test_local_code_opens_and_survives_pull(self):
+        door, relay, up, clock, store = make_door()
+        store.add_local_token("fn-local-test-code-123", "test", clock() + 3600)
+        store.replace_tokens([])   # backend pull wipes backend tokens only
+        self.assertEqual(door.qr("fn-local-test-code-123"), "opened")
+        self.assertEqual(up.of("door_event")[0]["source"], "qr_local")
+
+    def test_local_code_expires(self):
+        door, _, _, clock, store = make_door()
+        store.add_local_token("fn-local-test-code-123", "test", clock() + 60)
+        clock.advance(61)
+        self.assertEqual(door.qr("fn-local-test-code-123"), "denied")
+
+    def test_backend_token_source_is_qr(self):
+        door, _, up, _, _ = make_door()
+        door.qr("good")
+        self.assertEqual(up.of("door_event")[0]["source"], "qr")
+
+    def test_qr_tool_create_list_revoke(self):
+        import contextlib
+        import io
+
+        import qr_tool
+        with tempfile.TemporaryDirectory() as d:
+            db, out = os.path.join(d, "f.db"), os.path.join(d, "qr")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                qr_tool.main(["--db", db, "create", "--label", "cleaners", "--count", "3",
+                              "--hours", "2", "--out", out])
+                qr_tool.main(["--db", db, "create", "--label", "test", "--out", out])
+            st = Store(db)
+            rows = st.list_local_tokens()
+            self.assertEqual(sorted(r[1] for r in rows), ["cleaners"] * 3 + ["test"])
+            self.assertTrue(all(st.token_valid(r[0]) for r in rows))
+            self.assertEqual(len([f for f in os.listdir(out) if f.endswith(".png")]), 4)
+            st.close()
+            with contextlib.redirect_stdout(io.StringIO()):
+                qr_tool.main(["--db", db, "revoke", "--label", "cleaners"])
+            st = Store(db)
+            self.assertEqual([r[1] for r in st.list_local_tokens()], ["test"])
+            st.close()
+
+    def test_qr_image_decodes_to_token(self):
+        # Round-trip: the PNG must contain exactly the token (skips if no decoder)
+        try:
+            import cv2
+        except ImportError:
+            self.skipTest("opencv not installed")
+        import contextlib
+        import io
+
+        import qr_tool
+        with tempfile.TemporaryDirectory() as d:
+            with contextlib.redirect_stdout(io.StringIO()):
+                path = qr_tool.write_qr("fn-roundtrip-token-0001", "t", d)
+            text, _, _ = cv2.QRCodeDetector().detectAndDecode(cv2.imread(path))
+            self.assertEqual(text, "fn-roundtrip-token-0001")
+
+
 class DoorConfigTests(unittest.TestCase):
     def bad(self, **overrides):
         env = dict(TWO_DOORS, **overrides)

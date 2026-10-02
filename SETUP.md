@@ -1,5 +1,9 @@
 # Bhumijo Gateway Service - Complete Setup Guide
 
+> **Legacy gateway.** This document covers `gateway_service.py`, the old single-door, online-only gateway.
+> It stays here only until the switchover. **New installs use the facility node:** see
+> [`facility-node/SETUP.md`](facility-node/SETUP.md).
+
 ## Overview
 
 Linux implementation of Bhumijo Gateway Service. Acts as a bridge between QR scanners, WiFi buttons, environmental sensors, and KC868-A4S relay controllers, syncing with Bhumijo backend server.

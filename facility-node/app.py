@@ -3,6 +3,8 @@
 LAN only. Never expose port 5454 to the internet.
 
     POST /qr              {token}            QR scanner; door chosen by scanner IP
+    GET|POST /qrscanner   ?cardid=..         same, legacy scanner format + response
+    POST /rakindaqrscanner {SCode}           same, Rakinda format + response
     POST /facility/open   {authCode, door}   Facility app; door = section name
     POST /door/opened     ?door=<name>       bench test only (DOOR_TEST_ENDPOINTS=1)
     POST /door/closed     ?door=<name>       bench test only (DOOR_TEST_ENDPOINTS=1)
@@ -19,7 +21,31 @@ from flask import Flask, jsonify, request
 log = logging.getLogger("app")
 
 STATUS = {"opened": 200, "denied": 403, "relay_error": 502,
-          "unknown_scanner": 403, "unknown_door": 400}
+          "unknown_scanner": 403, "unknown_door": 400, "rate_limited": 429}
+
+# Field names scanners use for the scanned text, in priority order
+TOKEN_FIELDS = ("token", "SCode", "scode", "cardid", "code", "qr", "data")
+
+
+def scanned_token(req):
+    """Pull the scanned code out of whatever the scanner sent.
+
+    Accepts JSON, form fields or query string with any TOKEN_FIELDS name, or a
+    plain-text body that is just the code.
+    """
+    data = req.get_json(silent=True)
+    sources = [data if isinstance(data, dict) else {}, req.form, req.args]
+    for src in sources:
+        for field in TOKEN_FIELDS:
+            value = src.get(field)
+            if value:
+                return str(value).strip()
+    if isinstance(data, str) and data.strip():
+        return data.strip()
+    raw = req.get_data(as_text=True).strip()
+    if raw and "=" not in raw and not raw.startswith("{") and len(raw) <= 256:
+        return raw
+    return None
 
 
 class FailureLimiter:
@@ -66,22 +92,32 @@ def create_app(settings, doors, store, uplink, camera=None, limiter=None):
         return (jsonify(ok=result == "opened", result=result,
                         door=door.name if door else None), STATUS[result])
 
-    def unlock(door, fn_name, value):
+    def attempt(door, fn_name, value):
+        """-> (result, door). Applies the failure limiter."""
         ip = request.remote_addr or "?"
         # Known scanners are exempt: a run of bad codes at the door must not
         # lock the scanner out for everyone. Tokens can't be brute-forced by
         # holding codes up to a camera anyway.
         if fn_name == "qr" and ip in by_scanner:
-            return reply(door.qr(value), door)
+            return door.qr(value), door
         if limiter.blocked(ip):
-            return jsonify(ok=False, result="rate_limited"), 429
+            return "rate_limited", None
         if door is None:
             limiter.fail(ip)
-            return reply("unknown_scanner" if fn_name == "qr" else "unknown_door")
+            return ("unknown_scanner" if fn_name == "qr" else "unknown_door"), None
         result = getattr(door, fn_name)(value)
         if result == "denied":
             limiter.fail(ip)
-        return reply(result, door)
+        return result, door
+
+    def unlock(door, fn_name, value):
+        return reply(*attempt(door, fn_name, value))
+
+    def scan():
+        door = by_scanner.get(request.remote_addr) or any_scanner
+        if door is None:
+            log.warning("scan from unknown scanner %s", request.remote_addr)
+        return attempt(door, "qr", scanned_token(request))
 
     def named_door(name):
         if name is None and len(doors) == 1:
@@ -90,10 +126,24 @@ def create_app(settings, doors, store, uplink, camera=None, limiter=None):
 
     @app.post("/qr")
     def qr():
-        door = by_scanner.get(request.remote_addr) or any_scanner
-        if door is None:
-            log.warning("scan from unknown scanner %s", request.remote_addr)
-        return unlock(door, "qr", body().get("token"))
+        return reply(*scan())
+
+    # Scanner-compatible routes: same checks as /qr, replies in the format the
+    # existing scanners already understand. Drop once all scanners use /qr.
+    @app.route("/qrscanner", methods=["GET", "POST"])
+    def qrscanner():
+        result, door = scan()
+        ok = result == "opened"
+        params = request.args.to_dict() or (request.get_json(silent=True) or {})
+        return jsonify(status="success" if ok else "denied", data=[params],
+                       access_granted=ok, door=door.name if door else None), 200
+
+    @app.post("/rakindaqrscanner")
+    def rakinda():
+        result, _ = scan()
+        if result == "opened":
+            return jsonify(ResultCode="1", Msg="Please Enter the facility", Audio="40"), 200
+        return jsonify(ResultCode="0", Msg="Access denied", Audio="0"), 200
 
     @app.post("/facility/open")
     def facility_open():
