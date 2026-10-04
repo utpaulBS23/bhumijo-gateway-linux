@@ -4,7 +4,7 @@ From a blank Raspberry Pi 5 to a commissioned facility with two doors (male and 
 Follow the steps in order. Each step ends with a check, so stop there if the check fails.
 
 ```
-                     Router 192.168.10.100
+                     Router 192.168.10.1
       ┌──────────────┬──────┴───────┬───────────────┬──────────────┐
  QR male .101   QR female .102   Pi 5 .104      KC868 .174     Camera .180
       │  POST /qr      │ POST /qr     │ :5454          │ :80          │ RTSP :554
@@ -60,15 +60,15 @@ Follow the steps in order. Each step ends with a check, so stop there if the che
 
 ## 2. Network: router and IP plan
 
-In the router admin page (usually `http://192.168.10.100`):
+In the router admin page (usually `http://192.168.10.1`):
 
-1. Set the LAN to `192.168.10.0/24`, with the router at **192.168.10.100**.
+1. Set the LAN to `192.168.10.0/24`, with the router at **192.168.10.1**.
 2. **Shrink the DHCP pool** so it excludes the device addresses below, e.g. `192.168.10.150–199` minus .174/.180, or simply `192.168.10.200–250`.
 3. Reserve or set these static addresses:
 
 | Device | IP | Port |
 |---|---|---|
-| Router / gateway | 192.168.10.100 | — |
+| Router / gateway | 192.168.10.1 | — |
 | QR scanner, **male** | 192.168.10.101 | sends to Pi :5454 |
 | QR scanner, **female** | 192.168.10.102 | sends to Pi :5454 |
 | Raspberry Pi 5 | 192.168.10.104 | 5454 |
@@ -202,7 +202,7 @@ curl "http://192.168.10.174/input_ctl.cgi?postpwd=<PASSWORD>"              # hol
 
 ## 5. Raspberry Pi OS
 
-Follow **[INSTALL.md](INSTALL.md) sections 1–4**: flash Raspberry Pi OS Lite (64-bit), first login, static IP `192.168.10.104` (gateway `192.168.10.100`), OS update.
+Follow **[INSTALL.md](INSTALL.md) sections 1–4**: flash Raspberry Pi OS Lite (64-bit), first login, static IP `192.168.10.104` (gateway `192.168.10.1`), OS update.
 
 ✅ **Check:** `ssh pi@192.168.10.104` works, and `ping -c1 192.168.10.174` gets a reply.
 
@@ -240,7 +240,7 @@ On each scanner's configuration page or tool:
 |---|---|---|
 | IP | 192.168.10.101 | 192.168.10.102 |
 | Netmask | 255.255.255.0 | 255.255.255.0 |
-| Gateway | 192.168.10.100 | 192.168.10.100 |
+| Gateway | 192.168.10.1 | 192.168.10.1 |
 | Mode | HTTP upload / POST | HTTP upload / POST |
 | Server URL | `http://192.168.10.104:5454/qr` | `http://192.168.10.104:5454/qr` |
 

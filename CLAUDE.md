@@ -32,7 +32,7 @@ Work from the repo root (the folder containing this file). Report briefly after 
    ```bash
    grep -E 'VERSION_CODENAME' /etc/os-release      # bookworm (or trixie)
    hostname -I                                     # expect 192.168.10.104
-   ping -c1 -W2 192.168.10.100 && ping -c1 -W3 8.8.8.8
+   ping -c1 -W2 192.168.10.1 && ping -c1 -W3 8.8.8.8
    sudo -n true && echo SUDO-OK
    ```
    - **Wrong OS:** Raspberry Pi OS Lite 64-bit is needed; see INSTALL.md §1.

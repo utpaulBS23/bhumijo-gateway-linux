@@ -60,7 +60,7 @@ Use **one** of these methods.
 
 ```bash
 sudo nmcli con mod "Wired connection 1" ipv4.method manual \
-  ipv4.addresses 192.168.10.104/24 ipv4.gateway 192.168.10.100 ipv4.dns 192.168.10.100
+  ipv4.addresses 192.168.10.104/24 ipv4.gateway 192.168.10.1 ipv4.dns 192.168.10.1
 sudo nmcli con up "Wired connection 1"
 ```
 
@@ -74,7 +74,7 @@ ssh pi@192.168.10.104
 
 ```bash
 hostname -I                 # 192.168.10.104
-ping -c2 192.168.10.100     # router replies
+ping -c2 192.168.10.1     # router replies
 ping -c2 8.8.8.8            # internet works (needed for the install)
 ```
 

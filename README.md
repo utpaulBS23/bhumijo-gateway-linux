@@ -22,7 +22,7 @@ facility config && facility doctor
 
 | Device | IP |
 |---|---|
-| Router | 192.168.10.100 |
+| Router | 192.168.10.1 |
 | QR scanner, male / female | 192.168.10.101 / .102 |
 | Raspberry Pi 5 (facility node) | 192.168.10.104:5454 |
 | KC868-A4S relay | 192.168.10.174 |

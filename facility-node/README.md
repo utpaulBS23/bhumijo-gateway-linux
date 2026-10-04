@@ -37,7 +37,7 @@ On an installed Pi, read them with `facility docs readme | install | setup`.
 ## 1. Architecture
 
 ```
-                         Router 192.168.10.100  ──── internet (outbound HTTPS only) ──── Admin backend + MySQL
+                         Router 192.168.10.1    ──── internet (outbound HTTPS only) ──── Admin backend + MySQL
      ┌──────────────┬──────────┴─────┬────────────────┬───────────────┐
  QR male .101   QR female .102   Raspberry Pi 5 .104   KC868-A4S .174   IP camera .180
      │ POST /qr       │ POST /qr      │ :5454             │ :80             │ RTSP :554
@@ -128,7 +128,7 @@ The full walkthrough is in **[INSTALL.md](INSTALL.md)**. Wiring and commissionin
 
 | Device | IP | Port |
 |---|---|---|
-| Router / gateway | 192.168.10.100 | — |
+| Router / gateway | 192.168.10.1 | — |
 | QR scanner male / female | 192.168.10.101 / .102 | → Pi :5454 |
 | Raspberry Pi 5 | 192.168.10.104 | 5454 (LAN only) |
 | KC868-A4S | 192.168.10.174 | 80 |
