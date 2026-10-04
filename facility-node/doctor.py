@@ -71,6 +71,8 @@ def check_config(r, env_path):
         r.line(WARN, "DOOR_TEST_ENDPOINTS=1", "turn off before handover")
     if any(h in s.qr_api_url for h in ("127.0.0.1", "localhost")):
         r.line(WARN, "QR_API_URL points at this machine", "dummy API? not for production")
+    if any(h in s.admin_url for h in ("127.0.0.1", "localhost")):
+        r.line(WARN, "ADMIN_URL points at this machine", "dummy backend? not for production")
     if (os.stat(env_path).st_mode & 0o007) != 0:
         r.line(WARN, ".env readable by everyone", "sudo chmod 640 " + env_path)
     return s

@@ -270,7 +270,7 @@ class OfflineTests(unittest.TestCase):
         types = [p["type"] for _, p, _ in self.http.posts]
         self.assertEqual(types, ["entry", "attendant"])
         self.assertTrue(self.http.posts[0][0].endswith(self.s.door_event_path))
-        self.assertEqual(self.http.posts[0][2], {"Authorization": "Bearer admin-secret"})
+        self.assertEqual(self.http.posts[0][2]["Authorization"], "Bearer admin-secret")
 
     def test_server_error_keeps_queue(self):
         self.uplink.enqueue("sensor", {"x": 1})
@@ -286,7 +286,8 @@ class OfflineTests(unittest.TestCase):
             self.uplink.flush()
         self.http.post_status = 200
         self.uplink.flush()
-        self.assertEqual([p for _, p, _ in self.http.posts][-1], {"good": True})
+        last = [p for _, p, _ in self.http.posts][-1]
+        self.assertEqual({k: v for k, v in last.items() if k != "id"}, {"good": True})
         self.assertEqual(self.store.queue_size(), 0)
 
     def test_pull_failure_keeps_cache(self):
@@ -313,6 +314,53 @@ class OfflineTests(unittest.TestCase):
         self.http.get_resp = FakeResp(200, {"facilityId": "facility-999", "tokens": []})
         self.assertFalse(self.uplink.pull_tokens())
         self.assertTrue(self.store.token_valid("cached"))
+
+
+class EventIdTests(unittest.TestCase):
+    def setUp(self):
+        self.store = Store(":memory:")
+        self.http = FakeSession()
+        self.uplink = Uplink(settings(), self.store, session=self.http)
+
+    def test_every_item_gets_unique_id(self):
+        import uuid
+        for i in range(3):
+            self.uplink.enqueue("door_event", {"n": i})
+        self.uplink.flush()
+        ids = [p["id"] for _, p, _ in self.http.posts]
+        self.assertEqual(len(set(ids)), 3)
+        for i in ids:
+            uuid.UUID(i)   # valid UUID
+
+    def test_id_sent_as_idempotency_header(self):
+        self.uplink.enqueue("alert", {"x": 1})
+        self.uplink.flush()
+        _, payload, headers = self.http.posts[0]
+        self.assertEqual(headers["Idempotency-Key"], payload["id"])
+
+    def test_retry_resends_same_id(self):
+        self.uplink.enqueue("sensor", {"x": 1})
+        self.http.post_status = 503
+        self.uplink.flush()
+        self.uplink.flush()
+        self.http.post_status = 200
+        self.uplink.flush()
+        ids = {p["id"] for _, p, _ in self.http.posts}
+        self.assertEqual(len(self.http.posts), 3)
+        self.assertEqual(len(ids), 1, "same event must keep its id across retries")
+
+    def test_id_survives_restart(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "f.db")
+            st = Store(path)
+            Uplink(settings(), st, session=FakeSession()).enqueue("door_event", {"n": 1})
+            queued_id = st.peek()[0][2]["id"]
+            st.close()
+            st = Store(path)
+            http = FakeSession()
+            Uplink(settings(), st, session=http).flush()
+            self.assertEqual(http.posts[0][1]["id"], queued_id)
+            st.close()
 
 
 class StoreTests(unittest.TestCase):
@@ -839,7 +887,8 @@ class SnapshotUploadTests(unittest.TestCase):
         self.assertTrue(url.endswith("/facility/snapshot"))
         self.assertEqual((name, data, ctype), ("snap1.jpg", b"\xff\xd8jpeg", "image/jpeg"))
         self.assertEqual(form["name"], "snap1.jpg")
-        self.assertEqual(headers, {"Authorization": "Bearer admin-secret"})
+        self.assertEqual(headers["Authorization"], "Bearer admin-secret")
+        self.assertEqual(headers["Idempotency-Key"], form["id"])
         self.assertEqual(self.http.posts[0][1]["snapshot"], "snap1.jpg")
 
     def test_upload_retries_while_offline(self):
@@ -1077,6 +1126,92 @@ class DoctorTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertIsNone(doctor.check_config(r, "/nonexistent/.env"))
         self.assertEqual(r.failed, 1)
+
+
+class DummyBackendTests(unittest.TestCase):
+    """The dummy backend honours the contract, and the real Uplink works against it."""
+
+    def setUp(self):
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "dev"))
+        from dummy_backend import create_app as backend_app
+        self.tmp = tempfile.TemporaryDirectory()
+        self.app = backend_app(data_dir=self.tmp.name, quiet=True)
+        self.c = self.app.test_client()
+        self.H = {"Authorization": "Bearer dummy-key"}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def bridge(self):
+        client = self.c
+
+        class Bridge:   # requests-like session -> Flask test client
+            def post(self, url, json=None, headers=None, timeout=None, files=None, data=None):
+                path = url.split("127.0.0.1:8091", 1)[1]
+                if files:
+                    name, fh, ctype = files["file"]
+                    form = dict(data or {}, file=(io.BytesIO(fh.read()), name, ctype))
+                    r = client.post(path, data=form, headers=headers,
+                                    content_type="multipart/form-data")
+                else:
+                    r = client.post(path, json=json, headers=headers)
+                return FakeResp(r.status_code, r.get_json())
+
+            def get(self, url, params=None, headers=None, timeout=None):
+                path = url.split("127.0.0.1:8091", 1)[1]
+                r = client.get(path, query_string=params, headers=headers)
+                return FakeResp(r.status_code, r.get_json())
+
+        import io
+        return Bridge()
+
+    def test_auth_required(self):
+        self.assertEqual(self.c.get("/api/facility/tokens?facility=f").status_code, 401)
+        self.assertEqual(self.c.get("/api/facility/tokens?facility=f", headers=self.H).status_code, 200)
+
+    def test_missing_fields_422_and_dedupe(self):
+        r = self.c.post("/api/facility/door-event", json={"id": "1", "facility": "f"}, headers=self.H)
+        self.assertEqual(r.status_code, 422)
+        ev = {"id": "e1", "facility": "f", "section": "male", "type": "entry", "ts": "t"}
+        self.assertFalse(self.c.post("/api/facility/door-event", json=ev, headers=self.H).json["duplicate"])
+        self.assertTrue(self.c.post("/api/facility/door-event", json=ev, headers=self.H).json["duplicate"])
+        state = self.c.get("/admin/state").json
+        self.assertEqual((state["counts"]["door_event"], state["duplicates"]), (1, 1))
+
+    def test_outage_returns_503(self):
+        self.c.post("/admin/outage?on=1")
+        self.assertEqual(self.c.get("/api/facility/tokens?facility=f", headers=self.H).status_code, 503)
+        self.c.post("/admin/outage?on=0")
+        self.assertEqual(self.c.get("/api/facility/tokens?facility=f", headers=self.H).status_code, 200)
+
+    def test_node_end_to_end_against_dummy(self):
+        s = settings(env={"ADMIN_URL": "http://127.0.0.1:8091/api", "ADMIN_KEY": "dummy-key",
+                          "SNAPSHOT_UPLOAD_PATH": "/facility/snapshot"},
+                     snapshot_dir=self.tmp.name)
+        store = Store(":memory:")
+        up = Uplink(s, store, session=self.bridge())
+        self.assertTrue(up.pull_tokens())
+        self.assertTrue(store.token_valid("DUMMY-ALLOW-0001"))
+        self.assertTrue(store.auth_code_valid("dummy-auth-code"))
+
+        door = DoorController(s, MAIN, store, FakeRelay(), up, spawn=lambda fn: fn())
+        self.assertEqual(door.qr("DUMMY-ALLOW-0001"), "opened")
+        door.door_opened()
+        door.door_closed()
+        up.enqueue("sensor", {"facility": s.facility_id, "ts": "t", "tvoc": 100})
+        snap = os.path.join(self.tmp.name, "s1.jpg")
+        with open(snap, "wb") as f:
+            f.write(b"jpeg")
+        up.queue_snapshot("s1.jpg", snap, "t")
+
+        self.c.post("/admin/outage?on=1")
+        self.assertEqual(up.flush(), 0)
+        self.assertEqual(store.queue_size(), 4)
+        self.c.post("/admin/outage?on=0")
+        self.assertEqual(up.flush(), 4)
+        counts = self.c.get("/admin/state").json["counts"]
+        self.assertEqual(counts, {"door_event": 2, "alert": 0, "sensor": 1, "snapshot": 1})
 
 
 class MiscTests(unittest.TestCase):

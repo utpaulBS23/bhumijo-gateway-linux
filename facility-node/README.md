@@ -37,7 +37,7 @@ On an installed Pi, read them with `facility docs readme | install | setup`.
 ## 1. Architecture
 
 ```
-                         Router 192.168.10.100  ──── internet (outbound HTTPS only) ──── Admin backend + MySQL
+                         Router 192.168.10.1    ──── internet (outbound HTTPS only) ──── Admin backend + MySQL
      ┌──────────────┬──────────┴─────┬────────────────┬───────────────┐
  QR male .101   QR female .102   Raspberry Pi 5 .104   KC868-A4S .174   IP camera .180
      │ POST /qr       │ POST /qr      │ :5454             │ :80             │ RTSP :554
@@ -128,7 +128,7 @@ The full walkthrough is in **[INSTALL.md](INSTALL.md)**. Wiring and commissionin
 
 | Device | IP | Port |
 |---|---|---|
-| Router / gateway | 192.168.10.100 | — |
+| Router / gateway | 192.168.10.1 | — |
 | QR scanner male / female | 192.168.10.101 / .102 | → Pi :5454 |
 | Raspberry Pi 5 | 192.168.10.104 | 5454 (LAN only) |
 | KC868-A4S | 192.168.10.174 | 80 |
@@ -227,10 +227,14 @@ Port 5454, **facility LAN only**: the firewall blocks everything else, and there
 
 All calls go **Pi → backend**, with header `ADMIN_AUTH_HEADER: ADMIN_AUTH_SCHEME ADMIN_KEY` (default `Authorization: Bearer <key>`). Timestamps are ISO 8601 UTC (`2026-10-02T10:15:00Z`).
 
+**Every pushed item carries a unique `id` (UUID)**, in the body and as the `Idempotency-Key` header. A retry after a lost reply resends the **same** `id`, so the backend must store the id and treat a repeat as success without saving it twice: reply 2xx and skip it.
+
+**Test without the real backend:** `python3 dev/dummy_backend.py` implements all of these APIs, with a live dashboard (section 12).
+
 ### Push sensor: `POST SENSOR_PATH` (every 60 s)
 
 ```json
-{"facility": "facility-001", "ts": "…Z",
+{"id": "7f3c…", "facility": "facility-001", "ts": "…Z",
  "tvoc": 120, "eco2": 450, "aqi": 2, "temperature": 28.4, "humidity": 71.2,
  "nh3_ppm": 3.1, "h2s_ppm": 0.2,
  "camera": {"reachable": true, "streaming": true, "frozen": false, "checked_at": "…"}}
@@ -241,7 +245,7 @@ Values are `null` when a sensor is warming up, failed, or not fitted.
 ### Push door-event: `POST DOOR_EVENT_PATH` (per event)
 
 ```json
-{"facility": "facility-001", "section": "male", "type": "entry", "ts": "…Z", "source": "qr"}
+{"id": "b21e…", "facility": "facility-001", "section": "male", "type": "entry", "ts": "…Z", "source": "qr"}
 ```
 
 | `type` | Extra fields |
@@ -255,7 +259,7 @@ Values are `null` when a sensor is warming up, failed, or not fitted.
 ### Push alert: `POST ALERT_PATH` (per anomaly)
 
 ```json
-{"facility": "facility-001", "section": "female", "type": "anomaly", "subtype": "propped_open",
+{"id": "c9a0…", "facility": "facility-001", "section": "female", "type": "anomaly", "subtype": "propped_open",
  "ts": "…Z", "duration_s": 300, "repeat": false, "snapshot": "20261002T101500Z.jpg"}
 ```
 
@@ -283,13 +287,13 @@ The method, field names, extra fields, reply field, allow values and deny status
 
 ### Optional: snapshot upload (`SNAPSHOT_UPLOAD_PATH`)
 
-Multipart `POST` with field `file` (image/jpeg) plus form fields `facility`, `name` and `ts`. It's queued **before** its alert, so the image arrives first. The alert's `snapshot` equals `name`.
+Multipart `POST` with field `file` (image/jpeg) plus form fields `id`, `facility`, `name` and `ts`. It's queued **before** its alert, so the image arrives first. The alert's `snapshot` equals `name`.
 
 ### Retry rules (all pushes)
 
 | Backend reply | Pi does |
 |---|---|
-| 2xx | Delivered, removed from the queue |
+| 2xx | Delivered, removed from the queue (a duplicate `id` should also get 2xx) |
 | Network error, 5xx, 401, 403, 408, 429 | Keeps it, pauses, retries every `FLUSH_INTERVAL` |
 | Other 4xx | Retries 5 times, then drops that one item (logged) so it can't block the queue |
 
@@ -349,7 +353,7 @@ Runs on any machine with Python 3.9+. No Pi or hardware is needed for the tests.
 ```bash
 cd facility-node
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python test_door.py            # 104 tests
+.venv/bin/python test_door.py            # 112 tests
 ```
 
 The test suite fakes the relay, the backend and the clock. It covers:
@@ -360,6 +364,8 @@ The test suite fakes the relay, the backend and the clock. It covers:
 - config validation and the doctor.
 
 **Run the whole node locally against fakes:** start `dev/dummy_qr_api.py` (QR API on :8090), point `RELAY_URL` / `ADMIN_URL` at local stubs, set `HOST=127.0.0.1` and `CAM_RTSP=`, then run `python app.py`. The sensors log I2C errors and report `null`, which is expected off-Pi.
+
+**Dummy admin backend:** `python3 dev/dummy_backend.py` serves all the backend APIs on :8091 (token pull, sensor, door-event, alert, snapshot, QR validate). It checks auth, rejects missing fields with 422, ignores duplicate ids, and can simulate an outage. Open `http://127.0.0.1:8091/` for a live dashboard of everything the node sent. Point a node at it with `ADMIN_URL=http://127.0.0.1:8091/api` and `ADMIN_KEY=dummy-key`.
 
 **Dummy QR codes:** `dev/qr/DUMMY-ALLOW-*.png` are approved by the dummy API, and `DUMMY-DENY-0001.png` is refused. Regenerate them with `python dev/make_dummy_qr.py`.
 
@@ -396,6 +402,7 @@ facility-node/
 │   ├── main.py         Patched relay firmware (MicroPython)
 │   └── board_secrets.py.example
 ├── dev/
+│   ├── dummy_backend.py Dummy admin backend: all APIs + dashboard (testing only)
 │   ├── dummy_qr_api.py Dummy QR validation API (testing only)
 │   ├── make_dummy_qr.py
 │   └── qr/             DUMMY-ALLOW-000{1,2,3}.png, DUMMY-DENY-0001.png

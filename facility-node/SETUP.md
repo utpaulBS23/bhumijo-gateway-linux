@@ -4,7 +4,7 @@ From a blank Raspberry Pi 5 to a commissioned facility with two doors (male and 
 Follow the steps in order. Each step ends with a check, so stop there if the check fails.
 
 ```
-                     Router 192.168.10.100
+                     Router 192.168.10.1
       ┌──────────────┬──────┴───────┬───────────────┬──────────────┐
  QR male .101   QR female .102   Pi 5 .104      KC868 .174     Camera .180
       │  POST /qr      │ POST /qr     │ :5454          │ :80          │ RTSP :554
@@ -60,15 +60,15 @@ Follow the steps in order. Each step ends with a check, so stop there if the che
 
 ## 2. Network: router and IP plan
 
-In the router admin page (usually `http://192.168.10.100`):
+In the router admin page (usually `http://192.168.10.1`):
 
-1. Set the LAN to `192.168.10.0/24`, with the router at **192.168.10.100**.
+1. Set the LAN to `192.168.10.0/24`, with the router at **192.168.10.1**.
 2. **Shrink the DHCP pool** so it excludes the device addresses below, e.g. `192.168.10.150–199` minus .174/.180, or simply `192.168.10.200–250`.
 3. Reserve or set these static addresses:
 
 | Device | IP | Port |
 |---|---|---|
-| Router / gateway | 192.168.10.100 | — |
+| Router / gateway | 192.168.10.1 | — |
 | QR scanner, **male** | 192.168.10.101 | sends to Pi :5454 |
 | QR scanner, **female** | 192.168.10.102 | sends to Pi :5454 |
 | Raspberry Pi 5 | 192.168.10.104 | 5454 |
@@ -202,7 +202,7 @@ curl "http://192.168.10.174/input_ctl.cgi?postpwd=<PASSWORD>"              # hol
 
 ## 5. Raspberry Pi OS
 
-Follow **[INSTALL.md](INSTALL.md) sections 1–4**: flash Raspberry Pi OS Lite (64-bit), first login, static IP `192.168.10.104` (gateway `192.168.10.100`), OS update.
+Follow **[INSTALL.md](INSTALL.md) sections 1–4**: flash Raspberry Pi OS Lite (64-bit), first login, static IP `192.168.10.104` (gateway `192.168.10.1`), OS update.
 
 ✅ **Check:** `ssh pi@192.168.10.104` works, and `ping -c1 192.168.10.174` gets a reply.
 
@@ -240,7 +240,7 @@ On each scanner's configuration page or tool:
 |---|---|---|
 | IP | 192.168.10.101 | 192.168.10.102 |
 | Netmask | 255.255.255.0 | 255.255.255.0 |
-| Gateway | 192.168.10.100 | 192.168.10.100 |
+| Gateway | 192.168.10.1 | 192.168.10.1 |
 | Mode | HTTP upload / POST | HTTP upload / POST |
 | Server URL | `http://192.168.10.104:5454/qr` | `http://192.168.10.104:5454/qr` |
 
@@ -349,6 +349,30 @@ Then show the codes at a scanner:
 The dummy prints every request exactly as the Pi sends it, which is handy for agreeing the format with your backend team.
 
 > ⚠️ **Remove the dummy before handover.** It approves well-known codes. Set `QR_API_URL` to the real backend (or leave it empty) and stop the dummy. The node logs a warning whenever `QR_API_URL` points at `127.0.0.1` or `localhost`.
+
+---
+
+### Test the whole node against a dummy backend
+
+Before the real backend exists, run the dummy admin backend on the Pi. It answers every API the node calls:
+
+```bash
+cd /opt/facility-node && sudo -u facility ./venv/bin/python dev/dummy_backend.py --data /var/lib/facility/dummy-backend
+```
+
+In `.env`, set the following and restart the service:
+
+```ini
+ADMIN_URL=http://127.0.0.1:8091/api
+ADMIN_KEY=dummy-key
+QR_API_URL=/qr/validate
+```
+
+The dummy hands out `DUMMY-ALLOW-000{1,2,3}` and Auth Code `dummy-auth-code`. Watch what arrives at `http://192.168.10.104:8091/` (start it with `--host 0.0.0.0` and run `sudo ufw allow from 192.168.10.0/24 to any port 8091` for the duration of the test).
+
+Click **simulate outage** to check that doors keep opening and the queue drains afterwards with no duplicates.
+
+> ⚠️ Remove it before handover: set the real `ADMIN_URL` / `ADMIN_KEY`, stop the dummy, and run `sudo ufw delete allow from 192.168.10.0/24 to any port 8091`.
 
 ---
 
@@ -518,5 +542,6 @@ Then **revoke the test codes**: `facility qr revoke --label test`.
 - [ ] `DOOR_TEST_ENDPOINTS=0`
 - [ ] Test QR codes revoked (`qr list` shows none, or only staff codes with an expiry)
 - [ ] `QR_API_URL` is the real backend or empty, **not** the dummy (`127.0.0.1:8090`); the dummy is stopped
+- [ ] `ADMIN_URL` is the real backend, **not** the dummy backend (`127.0.0.1:8091`); no `ufw` rule for port 8091 (`sudo ufw status`)
 - [ ] Remote access via Cloudflare Tunnel only
 - [ ] SD image backed up

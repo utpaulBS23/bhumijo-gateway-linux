@@ -32,7 +32,7 @@ Work from the repo root (the folder containing this file). Report briefly after 
    ```bash
    grep -E 'VERSION_CODENAME' /etc/os-release      # bookworm (or trixie)
    hostname -I                                     # expect 192.168.10.104
-   ping -c1 -W2 192.168.10.100 && ping -c1 -W3 8.8.8.8
+   ping -c1 -W2 192.168.10.1 && ping -c1 -W3 8.8.8.8
    sudo -n true && echo SUDO-OK
    ```
    - **Wrong OS:** Raspberry Pi OS Lite 64-bit is needed; see INSTALL.md §1.
@@ -130,7 +130,7 @@ Match the symptoms against the troubleshooting tables in INSTALL.md §16 and SET
   - never create codes with `--no-expiry` unless the user insists after a warning;
   - revoke test codes after commissioning (`facility qr revoke --label test`);
   - never paste a real token into chat.
-- **Dummy QR API (`facility-node/dev/`):** only when the user asks for testing. Remind them to clear `QR_API_URL` and stop the dummy afterwards.
+- **Dummy QR API / dummy backend (`facility-node/dev/`):** only when the user asks for testing. Remind them afterwards to restore the real `ADMIN_URL` / `ADMIN_KEY`, clear `QR_API_URL`, stop the dummies, and remove any `ufw` rule for 8091.
 - **Don't change the system** beyond what `install.sh` does (no other `/etc` edits, apt removals or kernel and boot config changes) without asking.
 - **Never commit or print** `.env`, `board_secrets.py` or keys. Don't `git push` from the Pi unless asked.
 - **No destructive data actions without asking:** don't delete `/var/lib/facility` (database, queue, snapshots), and don't run `deploy/uninstall.sh --purge`.
@@ -152,7 +152,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
   2. `.env.example` (comment on its own line);
   3. the README §6 table;
   4. a SETUP/INSTALL section if a field tech needs it.
-- **New backend field or endpoint:** update the README §8 contract.
+- **New backend field or endpoint:** update the README §8 contract **and** `dev/dummy_backend.py`, so the dummy keeps matching the real contract. Every pushed item must keep its `id` (idempotency).
 - **Keep the offline-first rule:** nothing new may put the network or a sensor in the unlock path, or block the door from opening.
 - **Hardware imports** (`smbus2`, `gpiozero`) stay lazy, so tests run off-Pi.
 - **Style:** match the surrounding code (small modules, docstrings that explain why, no new dependencies without need).
