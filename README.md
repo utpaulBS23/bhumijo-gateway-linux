@@ -26,6 +26,6 @@ facility config && facility doctor
 | QR scanner, male / female | 192.168.10.101 / .102 |
 | Raspberry Pi 5 (facility node) | 192.168.10.104:5454 |
 | KC868-A4S relay | 192.168.10.174 |
-| IP camera | 192.168.10.180 |
+| IP camera | 192.168.10.149 |
 
 The legacy single-door gateway (`gateway_service.py`) was removed; it's in git history at commit `e364645`.

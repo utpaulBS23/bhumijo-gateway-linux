@@ -6,7 +6,7 @@ Follow the steps in order. Each step ends with a check, so stop there if the che
 ```
                      Router 192.168.10.1
       ┌──────────────┬──────┴───────┬───────────────┬──────────────┐
- QR male .101   QR female .102   Pi 5 .104      KC868 .174     Camera .180
+ QR male .101   QR female .102   Pi 5 .104      KC868 .174     Camera .149
       │  POST /qr      │ POST /qr     │ :5454          │ :80          │ RTSP :554
       └────────────────┴────────────► │ ─ sw_ctl.cgi ─►│              │
                                       │ ◄─ input_ctl ──│              │
@@ -63,7 +63,7 @@ Follow the steps in order. Each step ends with a check, so stop there if the che
 In the router admin page (usually `http://192.168.10.1`):
 
 1. Set the LAN to `192.168.10.0/24`, with the router at **192.168.10.1**.
-2. **Shrink the DHCP pool** so it excludes the device addresses below, e.g. `192.168.10.150–199` minus .174/.180, or simply `192.168.10.200–250`.
+2. **Shrink the DHCP pool** so it excludes the device addresses below, e.g. `192.168.10.150–199` minus .174, or simply `192.168.10.200–250`.
 3. Reserve or set these static addresses:
 
 | Device | IP | Port |
@@ -73,7 +73,7 @@ In the router admin page (usually `http://192.168.10.1`):
 | QR scanner, **female** | 192.168.10.102 | sends to Pi :5454 |
 | Raspberry Pi 5 | 192.168.10.104 | 5454 |
 | KC868-A4S | 192.168.10.174 | 80 |
-| IP camera | 192.168.10.180 | 554 |
+| IP camera | 192.168.10.149 | 554 |
 
 4. Change the router's admin password from the default.
 5. **No port forwarding** to anything. The Pi only makes outbound connections.
@@ -431,6 +431,18 @@ The defaults are only starting points.
 ---
 
 ## 8c. Camera snapshots
+
+### Connect the camera
+
+1. Give the camera a fixed IP (`192.168.10.149`): reserve it for the camera's MAC in the router.
+2. Run `facility camera` on the Pi. It asks for the IP, username, password (hidden) and brand, **tests the stream first**, then saves `CAM_HOST` / `CAM_RTSP` and restarts the service.
+   - **Imou / Dahua:** user `admin`; the password is the **Safety Code (SC)** on the label, or the Device Password set in the Imou app. **Not** the Imou app login. These cameras have no web page.
+   - `401 Unauthorized` = wrong user or password. Stop after 2–3 tries: the camera locks its login for ~30 min.
+3. Check: `facility camera test` → e.g. `OK: hevc 2560x1440 @ 25 fps`, and `facility health` → `camera.streaming: true`.
+
+Can't find the camera? `facility camera find` lists every device with RTSP open, plus model and serial number for Dahua/Imou.
+
+### Snapshots
 
 - **When:** a snapshot is taken on `forced_open` and on the first `propped_open` alert.
 - **Where:** saved to `/var/lib/facility/snapshots/` and deleted after `SNAPSHOT_KEEP_DAYS` (default 7).

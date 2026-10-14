@@ -23,6 +23,10 @@ facility <command>
                                             facility qr list
                                             facility qr revoke --label test
   mq <args>         MQ gas sensors: facility mq read | facility mq calibrate
+  camera [cmd]      IP camera: facility camera        set up (asks, tests, saves)
+                               facility camera test   test the saved stream
+                               facility camera show   settings, password hidden
+                               facility camera find   find cameras on the LAN
   update            git pull the source checkout, reinstall, restart
   docs [name]       read the docs: readme | install | setup  (default: install)
   version           installed version
@@ -40,6 +44,7 @@ case "$cmd" in
     test)    as_facility test_door.py ;;
     qr)      as_facility qr_tool.py "$@" ;;
     mq)      as_facility mq.py "$@" ;;
+    camera)  sudo bash "$DIR/deploy/camera-setup.sh" "$@" ;;
     docs)
         case "${1:-install}" in
             readme)  f=README.md ;; setup) f=SETUP.md ;; *) f=INSTALL.md ;;

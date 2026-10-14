@@ -39,7 +39,7 @@ On an installed Pi, read them with `facility docs readme | install | setup`.
 ```
                          Router 192.168.10.1    ──── internet (outbound HTTPS only) ──── Admin backend + MySQL
      ┌──────────────┬──────────┴─────┬────────────────┬───────────────┐
- QR male .101   QR female .102   Raspberry Pi 5 .104   KC868-A4S .174   IP camera .180
+ QR male .101   QR female .102   Raspberry Pi 5 .104   KC868-A4S .174   IP camera .149
      │ POST /qr       │ POST /qr      │ :5454             │ :80             │ RTSP :554
      └────────────────┴─────────────► │ ── sw_ctl.cgi ──► │ Relay01 → male timer → male lock
                                       │                   │ Relay02 → female timer → female lock
@@ -132,7 +132,7 @@ The full walkthrough is in **[INSTALL.md](INSTALL.md)**. Wiring and commissionin
 | QR scanner male / female | 192.168.10.101 / .102 | → Pi :5454 |
 | Raspberry Pi 5 | 192.168.10.104 | 5454 (LAN only) |
 | KC868-A4S | 192.168.10.174 | 80 |
-| IP camera | 192.168.10.180 | 554 |
+| IP camera | 192.168.10.149 | 554 |
 
 All of these are static and **outside the DHCP pool**. Only phones use DHCP.
 
@@ -341,6 +341,7 @@ Data on the Pi (`/var/lib/facility/`):
 | Change settings | `facility config` |
 | Test / staff QR codes | `facility qr create --label test` · `facility qr list` · `facility qr revoke --label test` |
 | Calibrate MQ sensors | `facility mq calibrate` |
+| Set up / check the camera | `facility camera` · `facility camera test` · `facility camera find` |
 | Update | `git pull` (auto-reinstalls after bootstrap) or `facility update`; scp copies: `sudo bash deploy/install.sh` |
 | Backup / spare Pi / uninstall | INSTALL.md sections 14–15 |
 

@@ -195,7 +195,7 @@ This opens `/opt/facility-node/.env` in nano. **Save with Ctrl-O, Enter, then ex
 | Setting | Default | Change if… |
 |---|---|---|
 | `RELAY_URL` | `http://192.168.10.174` | the relay has another IP |
-| `CAM_HOST` / `CAM_RTSP` | `.180` / example URL | always: put the real camera user, password and stream |
+| `CAM_HOST` / `CAM_RTSP` | `.149` / example URL | always: put the real camera user, password and stream |
 | `DOORS` + `DOOR_MALE_*` / `DOOR_FEMALE_*` | male: Relay01/Input01/GPIO27/.101, female: Relay02/Input02/GPIO22/.102 | wiring or scanner IPs differ |
 | `REED` | `0` | set `1` once the reed switches are fitted |
 | `ADMIN_AUTH_HEADER` / `ADMIN_AUTH_SCHEME` | `Authorization` / `Bearer` | the backend uses another header (e.g. `X-API-Key` with an empty scheme) |
@@ -312,6 +312,7 @@ facility status && facility doctor
 | `facility test` | Run the test suite |
 | `facility qr create --label test` | Make an unlock QR (24 h); add `--count 5 --hours 720` for staff codes |
 | `facility qr list` / `facility qr revoke --label test` | List or revoke Pi-made codes |
+| `facility camera` | Set up or change the IP camera: asks for IP, user, password and brand, tests the stream, then saves and restarts. `test` / `show` / `find` to check it |
 | `facility mq read` / `facility mq calibrate` | MQ gas sensor values / clean-air calibration |
 | `facility docs install` / `setup` / `readme` | Read the docs (q to quit) |
 | `facility update` | `git pull` the checkout, reinstall, restart |
