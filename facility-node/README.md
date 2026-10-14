@@ -119,7 +119,7 @@ The full walkthrough is in **[INSTALL.md](INSTALL.md)**. Wiring and commissionin
 | Raspberry Pi 5 (4 GB) + endurance microSD + 5V/5A supply | Runs everything |
 | KC868-A4S relay board | Patched firmware in `firmware/kc868/` |
 | Per door ×2: timer relay module, 12V mag lock, DPDT exit button, QR scanner, MC-38 reed (optional) | Locks fail open on power loss |
-| ENS160 + AHT20 | I2C |
+| ENS160 + AHT20 | On the Pi's I2C, **or** on an ESP32-S3 Feather WiFi board (`firmware/air-sensor/`) |
 | ADS1115 + MQ-135 + MQ-136 (optional) | I2C + analog, with a voltage divider on each MQ output |
 | IP camera (existing) | RTSP |
 | Router + mini DC-UPS | The UPS powers the Pi, router and camera, **not** the locks |
@@ -131,6 +131,7 @@ The full walkthrough is in **[INSTALL.md](INSTALL.md)**. Wiring and commissionin
 | Router / gateway | 192.168.10.1 | — |
 | QR scanner male / female | 192.168.10.101 / .102 | → Pi :5454 |
 | Raspberry Pi 5 | 192.168.10.104 | 5454 (LAN only) |
+| Air sensor board (ESP32-S3, optional) | 192.168.10.105 | 80, polled by the Pi |
 | KC868-A4S | 192.168.10.174 | 80 |
 | IP camera | 192.168.10.149 | 554 |
 
@@ -181,7 +182,17 @@ Each door keeps its own state. A male QR scan doesn't excuse a female door openi
 
 ### 5.4 Odour
 
-Any metric (`tvoc`, `aqi`, `nh3_ppm`, `h2s_ppm`) at or above its limit for `ODOUR_HOLD` (600 s) → `odour_high`, repeated every `ODOUR_REPEAT` (1800 s) while still high. All metrics below their limits for `ODOUR_CLEAR_HOLD` (300 s) → `odour_resolved`. Missing readings (warm-up or failure) neither start nor clear an alert.
+Every reading also carries **`tvoc_score`** (0–100) and **`tvoc_level`**, worked out on the Pi from TVOC. Each 20 points is one level of the German UBA TVOC guidance, the same scale the ENS160's own AQI uses; inside a level the score is a straight line:
+
+| Score | Level (`tvoc_level`) | TVOC (ppb) |
+|---|---|---|
+| 0–20 | `very_good` | 0–220 |
+| 21–40 | `good` | 220–660 |
+| 41–60 | `moderate` | 660–2200 |
+| 61–80 | `dangerous` | 2200–5500 |
+| 81–100 | `very_dangerous` | 5500–11000 and above (capped at 100) |
+
+Any metric (`tvoc`, `tvoc_score`, `aqi`, `nh3_ppm`, `h2s_ppm`) at or above its limit for `ODOUR_HOLD` (600 s) → `odour_high`, repeated every `ODOUR_REPEAT` (1800 s) while still high. All metrics below their limits for `ODOUR_CLEAR_HOLD` (300 s) → `odour_resolved`. Missing readings (warm-up or failure) neither start nor clear an alert.
 
 ---
 
@@ -198,7 +209,8 @@ All settings live in `/opt/facility-node/.env`, loaded by systemd. **`.env.examp
 | QR validation | `QR_API_URL`, `_METHOD`, `_ORDER`, `_TIMEOUT`, `_AUTH`, `_TOKEN_FIELD`, `_FACILITY_FIELD`, `_DOOR_FIELD`, `_EXTRA`, `_ALLOW_FIELD`, `_ALLOW_VALUES`, `_DENY_STATUS` | off when `QR_API_URL` is empty |
 | Reed | `REED`, `REED_ACTIVE_HIGH`, `PROPPED_THRESHOLD`, `PROPPED_REPEAT`, `CLASSIFY_WINDOW` | |
 | Camera | `CAM_HOST`, `CAM_PORT`, `CAM_RTSP`, `SNAPSHOT_DIR`, `SNAPSHOT_UPLOAD_PATH`, `SNAPSHOT_KEEP_DAYS` | upload off when the path is empty |
-| Odour | `ODOUR_TVOC_LIMIT`, `_AQI_LIMIT`, `_NH3_LIMIT`, `_H2S_LIMIT`, `ODOUR_HOLD`, `_REPEAT`, `_CLEAR_HOLD` | empty limit = metric off |
+| Air sensor board | `SENSOR_URL`, `SENSOR_TIMEOUT` | empty URL = ENS160/AHT20 on the Pi's I2C |
+| Odour | `ODOUR_TVOC_SCORE_LIMIT`, `ODOUR_TVOC_LIMIT`, `_AQI_LIMIT`, `_NH3_LIMIT`, `_H2S_LIMIT`, `ODOUR_HOLD`, `_REPEAT`, `_CLEAR_HOLD` | empty limit = metric off |
 | MQ sensors | `MQ`, `ADS1115_ADDR`, `MQ135_CHANNEL`, `MQ136_CHANNEL`, `MQ135_R0`, `MQ136_R0`, `MQ_RL_KOHM`, `MQ_DIVIDER`, `MQ_VC` | R0 from `facility mq calibrate` |
 | Storage | `DB_PATH`, `MAX_QUEUE` | |
 | Timing | `SENSOR_INTERVAL`, `PULL_INTERVAL`, `FLUSH_INTERVAL`, `CAM_PROBE_INTERVAL`, `CAM_FRAME_INTERVAL`, `EXIT_POLL_INTERVAL` | seconds |
@@ -235,12 +247,13 @@ All calls go **Pi → backend**, with header `ADMIN_AUTH_HEADER: ADMIN_AUTH_SCHE
 
 ```json
 {"id": "7f3c…", "facility": "facility-001", "ts": "…Z",
- "tvoc": 120, "eco2": 450, "aqi": 2, "temperature": 28.4, "humidity": 71.2,
+ "tvoc": 120, "tvoc_score": 11, "tvoc_level": "very_good",
+ "eco2": 450, "aqi": 2, "temperature": 28.4, "humidity": 71.2,
  "nh3_ppm": 3.1, "h2s_ppm": 0.2,
  "camera": {"reachable": true, "streaming": true, "frozen": false, "checked_at": "…"}}
 ```
 
-Values are `null` when a sensor is warming up, failed, or not fitted.
+Values are `null` when a sensor is warming up, failed, or not fitted. `tvoc_score` (0–100) and `tvoc_level` come from `tvoc` (section 5.4) and are `null` with it.
 
 ### Push door-event: `POST DOOR_EVENT_PATH` (per event)
 
@@ -268,7 +281,7 @@ Values are `null` when a sensor is warming up, failed, or not fitted.
 | `forced_open` | `section`, `snapshot?` | New alarm |
 | `propped_open` | `section`, `duration_s`, `repeat`, `snapshot?` (first only) | `repeat:false` = new alarm, `true` = update |
 | `propped_resolved` | `section`, `duration_s` | All-clear |
-| `odour_high` | `duration_s`, `repeat`, `metrics`, `readings` (no `section`) | `repeat:false` = new alarm, `true` = update |
+| `odour_high` | `duration_s`, `repeat`, `metrics` (e.g. `["tvoc_score"]`), `readings` (no `section`) | `repeat:false` = new alarm, `true` = update |
 | `odour_resolved` | `duration_s`, `readings` | All-clear |
 
 ### Pull tokens: `GET TOKENS_PATH?facility=<id>` (every 5 min)
@@ -341,6 +354,7 @@ Data on the Pi (`/var/lib/facility/`):
 | Change settings | `facility config` |
 | Test / staff QR codes | `facility qr create --label test` · `facility qr list` · `facility qr revoke --label test` |
 | Calibrate MQ sensors | `facility mq calibrate` |
+| Air sensor board (ESP32) | `facility sensor flash` · `facility sensor enable` · `facility sensor test` |
 | Set up / check the camera | `facility camera` · `facility camera test` · `facility camera find` |
 | Update | `git pull` (auto-reinstalls after bootstrap) or `facility update`; scp copies: `sudo bash deploy/install.sh` |
 | Backup / spare Pi / uninstall | INSTALL.md sections 14–15 |
@@ -399,6 +413,9 @@ facility-node/
 │   ├── uninstall.sh
 │   ├── facility        `facility` helper command
 │   └── facility-node.service
+├── firmware/air-sensor/
+│   ├── main.py         ESP32-S3 + ENS160/AHT20 over WiFi: GET /sensor (MicroPython)
+│   └── board_secrets.py.example  WiFi name, password and IP (real file stays on the board)
 ├── firmware/kc868/
 │   ├── main.py         Patched relay firmware (MicroPython)
 │   └── board_secrets.py.example

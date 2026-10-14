@@ -15,7 +15,7 @@ from config import ConfigError, DoorSpec, Settings
 from door import DoorController
 from inputs import run_exit_poller
 from relay import Relay, RelayError, parse_states
-from sensors_camera import aht20_decode, ens160_validity, frames_differ
+from sensors_camera import aht20_decode, ens160_usable, ens160_validity, frames_differ
 from store import Store
 from uplink import Uplink, parse_expiry
 
@@ -721,6 +721,113 @@ class DoorConfigTests(unittest.TestCase):
         self.assertEqual(s.doors, (MAIN,))
 
 
+class SensorBoardTests(unittest.TestCase):
+    """SENSOR_URL: readings from the WiFi sensor board (firmware/air-sensor)."""
+
+    GOOD = {"temperature": 24.1, "humidity": 55.2, "tvoc": 120, "eco2": 450, "aqi": 1,
+            "ens160_validity": 0, "age_s": 3, "uptime_s": 812}
+
+    def board(self, resp):
+        from sensors_camera import HttpSensors
+        session = FakeSession()
+        session.get_resp = resp
+        return HttpSensors("http://192.168.10.105/sensor", session=session), session
+
+    def test_reading_passes_through(self):
+        b, session = self.board(FakeResp(200, dict(self.GOOD)))
+        self.assertEqual(b.read(), dict(tvoc=120, eco2=450, aqi=1, temperature=24.1,
+                                        humidity=55.2))
+        self.assertEqual(session.get_calls[0][0], "http://192.168.10.105/sensor")
+
+    def test_board_down_gives_nulls(self):
+        b, session = self.board(FakeResp(200, dict(self.GOOD)))
+        session.online = False
+        with self.assertLogs("sensors", "ERROR"):
+            self.assertEqual(set(b.read().values()), {None})
+
+    def test_stale_or_bad_replies_give_nulls(self):
+        for resp in (FakeResp(200, dict(self.GOOD, age_s=600)),     # board stuck
+                     FakeResp(200, dict(self.GOOD, age_s=None)),    # never read
+                     FakeResp(500, dict(self.GOOD)),
+                     FakeResp(200, None, text="<html>"),
+                     FakeResp(200, ["not", "a", "dict"])):
+            b, _ = self.board(resp)
+            with self.assertLogs("sensors"):
+                self.assertEqual(set(b.read().values()), {None})
+
+    def test_warm_up_keeps_temperature_and_drops_junk(self):
+        b, _ = self.board(FakeResp(200, dict(self.GOOD, tvoc=None, eco2=None, aqi=None,
+                                             ens160_validity=1, humidity="55")))
+        with self.assertLogs("sensors", "INFO"):
+            got = b.read()
+        self.assertEqual(got, dict(tvoc=None, eco2=None, aqi=None, temperature=24.1,
+                                   humidity=None))
+
+    def test_setting_picks_the_source(self):
+        from sensors_camera import HttpSensors, Sensors, make_sensors
+        self.assertIsInstance(make_sensors(settings()), Sensors)
+        s = settings({"SENSOR_URL": "http://192.168.10.105/sensor", "SENSOR_TIMEOUT": "2"})
+        board = make_sensors(s)
+        self.assertIsInstance(board, HttpSensors)
+        self.assertEqual((board.url, board.timeout, board.max_age),
+                         ("http://192.168.10.105/sensor", 2.0, 180))
+
+
+class TvocScoreTests(unittest.TestCase):
+    """TVOC ppb -> 0-100 score and level (UBA bands, 20 points each)."""
+
+    def test_band_edges(self):
+        from odour import tvoc_level, tvoc_score
+        for ppb, score, level in ((0, 0, "very_good"), (220, 20, "very_good"),
+                                  (440, 30, "good"), (660, 40, "good"),
+                                  (2200, 60, "moderate"), (2400, 61, "dangerous"),
+                                  (5500, 80, "dangerous"), (8250, 90, "very_dangerous"),
+                                  (11000, 100, "very_dangerous"), (65000, 100, "very_dangerous")):
+            self.assertEqual((tvoc_score(ppb), tvoc_level(tvoc_score(ppb))), (score, level), ppb)
+
+    def test_missing_stays_missing(self):
+        from odour import add_tvoc_score
+        self.assertEqual(add_tvoc_score({"tvoc": None}),
+                         {"tvoc": None, "tvoc_score": None, "tvoc_level": None})
+        self.assertEqual(add_tvoc_score({}), {"tvoc_score": None, "tvoc_level": None})
+
+    def test_sensor_loop_pushes_score(self):
+        import threading
+        from sensors_camera import run_sensor_loop
+
+        class OneReading:
+            def read(self):
+                return dict(tvoc=3000, eco2=900, aqi=4, temperature=24.0, humidity=60.0)
+
+        class Cam:
+            def snapshot_status(self):
+                return {}
+
+        up, stop = FakeUplink(), threading.Event()
+        up.enqueue = (lambda orig: lambda kind, p: (orig(kind, p), stop.set()))(up.enqueue)
+        run_sensor_loop(settings(), OneReading(), Cam(), up, stop)
+        p = up.of("sensor")[0]
+        self.assertEqual((p["tvoc"], p["tvoc_score"], p["tvoc_level"]), (3000, 65, "dangerous"))
+
+    def test_alert_from_dangerous(self):
+        from odour import OdourMonitor, add_tvoc_score
+        s = settings(odour_tvoc_limit=None, odour_aqi_limit=None, odour_tvoc_score_limit=61,
+                     odour_hold=600, odour_repeat=1800, odour_clear_hold=300)
+        up, clock = FakeUplink(), Clock()
+        m = OdourMonitor(s, up, clock=clock)
+        for ppb in [2200] * 15:                       # score 60, moderate: never alerts
+            m.update(add_tvoc_score({"tvoc": ppb}))
+            clock.advance(60)
+        self.assertEqual(up.of("alert"), [])
+        for ppb in [2400] * 11:                       # score 61, dangerous, for 10 min
+            m.update(add_tvoc_score({"tvoc": ppb}))
+            clock.advance(60)
+        a = up.of("alert")[0]
+        self.assertEqual((a["subtype"], a["metrics"], a["readings"]["tvoc_score"]),
+                         ("odour_high", ["tvoc_score"], 61))
+        self.assertEqual(m.state()["tvoc_level"], "dangerous")
+
+
 class OdourTests(unittest.TestCase):
     def setUp(self):
         from odour import OdourMonitor
@@ -1240,6 +1347,13 @@ class MiscTests(unittest.TestCase):
         self.assertEqual(ens160_validity(0b10000011), 0)
         self.assertEqual(ens160_validity(0b00000100), 1)
         self.assertEqual(ens160_validity(0b00001100), 3)
+
+    def test_ens160_usable(self):
+        self.assertTrue(ens160_usable(0b10000011, 2))     # measuring, valid, AQI 2
+        # Seen on real hardware right after the mode switch: validity 0, all zeros
+        self.assertFalse(ens160_usable(0b00000000, 0))
+        self.assertFalse(ens160_usable(0b10000011, 0))    # AQI 0 is "no data"
+        self.assertFalse(ens160_usable(0b10001000, 3))    # initial start-up
 
     def test_frames_differ(self):
         a = bytes([100] * 64)

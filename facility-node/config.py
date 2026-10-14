@@ -209,6 +209,10 @@ class Settings:
     qr_api_allow_values: Tuple[str, ...]
     qr_api_deny_status: Tuple[int, ...]
 
+    # Sensors on a WiFi board (firmware/air-sensor); "" = ENS160/AHT20 on the Pi's I2C
+    sensor_url: str
+    sensor_timeout: float
+
     # Camera
     cam_host: str
     cam_port: int
@@ -230,6 +234,7 @@ class Settings:
 
     # Odour alert: limits (None = metric off) and timing in seconds
     odour_tvoc_limit: Optional[float]
+    odour_tvoc_score_limit: Optional[float]   # 0-100 score (odour.tvoc_score)
     odour_aqi_limit: Optional[float]
     odour_nh3_limit: Optional[float]
     odour_h2s_limit: Optional[float]
@@ -292,6 +297,8 @@ class Settings:
                 "QR_API_ALLOW_VALUES", DEFAULT_ALLOW_VALUES).split(",") if v.strip()),
             qr_api_deny_status=tuple(int(c) for c in _env(
                 "QR_API_DENY_STATUS", "400,403,404,410,422").split(",") if c.strip()),
+            sensor_url=_env("SENSOR_URL", ""),
+            sensor_timeout=_float("SENSOR_TIMEOUT", 3.0),
             cam_host=_env("CAM_HOST", ""),
             cam_port=_int("CAM_PORT", 554),
             cam_rtsp=_env("CAM_RTSP", ""),
@@ -306,6 +313,7 @@ class Settings:
             propped_repeat=_int("PROPPED_REPEAT", 180),
             classify_window=_float("CLASSIFY_WINDOW", 15),
             odour_tvoc_limit=_optional_float("ODOUR_TVOC_LIMIT"),
+            odour_tvoc_score_limit=_optional_float("ODOUR_TVOC_SCORE_LIMIT"),
             odour_aqi_limit=_optional_float("ODOUR_AQI_LIMIT"),
             odour_nh3_limit=_optional_float("ODOUR_NH3_LIMIT"),
             odour_h2s_limit=_optional_float("ODOUR_H2S_LIMIT"),

@@ -28,7 +28,7 @@ Follow the steps in order. Each step ends with a check, so stop there if the che
 
 - [ ] Raspberry Pi 5 (4 GB), 5V/5A USB-C supply, **endurance** microSD (32 GB)
 - [ ] KC868-A4S relay board
-- [ ] ENS160 + AHT20 sensor module
+- [ ] ENS160 + AHT20 sensor module (wired to the Pi, or on an ESP32-S3 Feather over WiFi: section 4a)
 - [ ] IP camera (already installed)
 - [ ] Router
 - [ ] Mini DC-UPS: powers the Pi, router and camera, **not** the locks
@@ -72,6 +72,7 @@ In the router admin page (usually `http://192.168.10.1`):
 | QR scanner, **male** | 192.168.10.101 | sends to Pi :5454 |
 | QR scanner, **female** | 192.168.10.102 | sends to Pi :5454 |
 | Raspberry Pi 5 | 192.168.10.104 | 5454 |
+| Air sensor board (ESP32-S3, if used) | 192.168.10.105 | 80 |
 | KC868-A4S | 192.168.10.174 | 80 |
 | IP camera | 192.168.10.149 | 554 |
 
@@ -197,6 +198,92 @@ curl "http://192.168.10.174/input_ctl.cgi?postpwd=<PASSWORD>"              # hol
 - A wrong password returns `401`.
 - `Input01=ON` while the male exit button is held, and `Input02=ON` for the female one.
 - If pressed reads `OFF` and released reads `ON`, delete the `not` in `read_inputs()` and upload again.
+
+---
+
+## 4a. Air sensor board (ESP32-S3 Feather, optional)
+
+Use this when the ENS160 + AHT20 sit on an **Adafruit ESP32-S3 Feather** near the toilets instead of on the Pi's pins.
+
+```
+ ENS160 ──STEMMA QT── AHT20 ──STEMMA QT── ESP32-S3 Feather ··· WiFi ··· router ─── Pi
+                                           192.168.10.105  GET /sensor   (Pi polls every 60 s)
+```
+
+**You need:** the Feather with both sensors plugged into its STEMMA QT port, a USB-C **data** cable, the **2.4 GHz** WiFi name and password, and internet on the Pi (first time only). Run every command **without sudo**; it asks for the Pi password only where it must.
+
+### 4a.1 Flash and connect (once per board)
+
+1. Plug the Feather into the Pi with the USB-C cable.
+2. Run:
+   ```bash
+   facility sensor flash
+   ```
+   It installs the tools, puts the board in bootloader mode by itself, erases it, installs MicroPython, checks both sensors are found (`0x38`, `0x53`), then asks for:
+   - **WiFi name**: exactly as shown (it lists the 2.4 GHz networks it can see);
+   - **WiFi password**: hidden, never saved on the Pi;
+   - **Board IP**: press Enter for `192.168.10.105`.
+
+   It finishes by reading the board over WiFi, e.g. `temperature 24.6 C   humidity 72 %`.
+3. If it says *can't reach the bootloader*: **hold BOOT, press and release RESET, release BOOT**, then run it again.
+
+### 4a.2 Point the node at the board
+
+```bash
+facility sensor enable
+```
+
+This checks the board answers, sets `SENSOR_URL=http://192.168.10.105/sensor` in `.env` (backup in `.env.bak-sensor`) and restarts the service. The log then shows `air sensors: http://192.168.10.105/sensor`.
+
+### 4a.3 Mount it
+
+Unplug it from the Pi and power it from any 5V USB-C supply, high on the toilet-area wall, away from vents, the door and water. It starts and joins the WiFi by itself after every power cut.
+
+The board has a fixed IP, so it may not appear in the router's device list; that's normal. Make sure the router's **DHCP pool excludes `.105`** (e.g. pool `.200–.250`).
+
+### 4a.4 Check it
+
+| Command | Shows |
+|---|---|
+| `facility sensor test` | The board's live reading: temperature, humidity, ENS160 state, TVOC + score |
+| `facility doctor` | "Air sensor board" section: reachable, AHT20, ENS160 |
+| `facility health` | `odour.tvoc_score` / `tvoc_level` as the service sees them |
+
+**ENS160 timing:** a **new** sensor reports *initial start-up* for **about 1 hour** (TVOC empty, which is normal), then *warming up* for ~3 min after each power-on. Readings settle over the first 24–48 h.
+
+### 4a.5 Later changes
+
+| Task | Command |
+|---|---|
+| New WiFi name or password | `facility sensor upload` (USB again) |
+| Firmware update after `git pull` | `facility sensor upload` |
+| Go back to sensors wired to the Pi | `facility sensor disable` |
+
+### 4a.6 Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `no board on USB` | Charge-only cable, or not plugged in. Try another USB-C cable |
+| A sensor missing in the I2C list | STEMMA QT cable not fully pushed in, or ENS160/AHT20 chain broken |
+| `no answer from 192.168.10.105` after upload | Wrong WiFi name or password (case-sensitive), or 5 GHz-only WiFi. See the board's log with the `repl` command it prints, then `facility sensor upload` |
+| `facility sensor test` works, `facility doctor` says not reachable | `SENSOR_URL` not set: `facility sensor enable` |
+| Readings `null` in the backend | Board unplugged or out of WiFi range. It reconnects by itself; doors are never affected |
+
+<details><summary>Manual steps (without <code>facility sensor</code>, e.g. from a laptop)</summary>
+
+```bash
+python3 -m venv ~/esp && ~/esp/bin/pip install esptool mpremote
+# MicroPython: https://micropython.org/download/ESP32_GENERIC_S3/ (standard build, v1.26 or newer)
+~/esp/bin/esptool --chip esp32s3 --port /dev/ttyACM0 erase-flash
+~/esp/bin/esptool --chip esp32s3 --port /dev/ttyACM0 write-flash 0 ESP32_GENERIC_S3-*.bin
+cd facility-node/firmware/air-sensor
+cp board_secrets.py.example board_secrets.py && nano board_secrets.py
+~/esp/bin/mpremote connect /dev/ttyACM0 cp board_secrets.py :board_secrets.py + cp main.py :main.py + reset
+rm board_secrets.py
+```
+
+Then set `SENSOR_URL=http://192.168.10.105/sensor` with `facility config`.
+</details>
 
 ---
 
@@ -383,6 +470,7 @@ Click **simulate outage** to check that doors keep opening and the queue drains 
 | Sensor | Values | Notes |
 |---|---|---|
 | ENS160 | `tvoc` (ppb), `eco2` (ppm), `aqi` (1–5) | General gases. A good *trend* signal, but not specific to toilet smells |
+| (Pi) | `tvoc_score` (0–100), `tvoc_level` | TVOC on a 0–100 scale, see below |
 | AHT20 | `temperature`, `humidity` | Also used to correct the ENS160's readings |
 | MQ-135 (optional) | `nh3_ppm` | Ammonia, the main urine smell |
 | MQ-136 (optional) | `h2s_ppm` | Hydrogen sulphide, the "rotten egg" smell |
@@ -407,11 +495,26 @@ facility mq calibrate     # samples for 3 min
 
 Until R0 is set, `nh3_ppm` and `h2s_ppm` stay `null`. Check `MQ_RL_KOHM` against the small resistor on the MQ board: `103` = 10 kΩ, `102` = 1 kΩ.
 
+### TVOC score (0–100)
+
+The Pi turns TVOC (ppb) into a score, using the German UBA TVOC levels (the same scale the ENS160's AQI uses):
+
+| Score | Level (`tvoc_level`) | TVOC (ppb) |
+|---|---|---|
+| 0–20 | `very_good` | 0–220 |
+| 21–40 | `good` | 220–660 |
+| 41–60 | `moderate` | 660–2200 |
+| 61–80 | `dangerous` | 2200–5500 |
+| 81–100 | `very_dangerous` | 5500–11000 and above (capped at 100) |
+
+See it live with `facility health` → `odour.tvoc_score` / `odour.tvoc_level`.
+
 ### Odour alert
 
 | `.env` | Default | Meaning |
 |---|---|---|
-| `ODOUR_TVOC_LIMIT` | 1500 | ppb; empty = off |
+| `ODOUR_TVOC_SCORE_LIMIT` | 61 | TVOC score 0–100; 61 = alert from `dangerous` on; empty = off |
+| `ODOUR_TVOC_LIMIT` | empty | raw TVOC in ppb instead of the score; empty = off |
 | `ODOUR_AQI_LIMIT` | 4 | 1–5; empty = off |
 | `ODOUR_NH3_LIMIT` | 10 | ppm; empty = off |
 | `ODOUR_H2S_LIMIT` | 1 | ppm; empty = off |

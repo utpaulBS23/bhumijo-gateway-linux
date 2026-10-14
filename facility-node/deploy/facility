@@ -27,6 +27,8 @@ facility <command>
                                facility camera test   test the saved stream
                                facility camera show   settings, password hidden
                                facility camera find   find cameras on the LAN
+  sensor [cmd]      ESP32 air sensor board: facility sensor flash | upload |
+                               enable | disable | test   (run without sudo)
   update            git pull the source checkout, reinstall, restart
   docs [name]       read the docs: readme | install | setup  (default: install)
   version           installed version
@@ -45,6 +47,7 @@ case "$cmd" in
     qr)      as_facility qr_tool.py "$@" ;;
     mq)      as_facility mq.py "$@" ;;
     camera)  sudo bash "$DIR/deploy/camera-setup.sh" "$@" ;;
+    sensor)  bash "$DIR/deploy/sensor-setup.sh" "$@" ;;   # sudo only inside, for .env
     docs)
         case "${1:-install}" in
             readme)  f=README.md ;; setup) f=SETUP.md ;; *) f=INSTALL.md ;;

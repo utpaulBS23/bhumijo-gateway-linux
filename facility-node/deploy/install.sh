@@ -39,7 +39,7 @@ cp "$SRC"/*.py "$SRC"/requirements.txt "$SRC"/.env.example "$DEST"/
 cp "$SRC"/README.md "$SRC"/INSTALL.md "$SRC"/SETUP.md "$DEST/docs/"
 rm -rf "$DEST/dev" "$DEST/firmware" "$DEST/deploy"
 cp -r "$SRC/dev" "$SRC/firmware" "$SRC/deploy" "$DEST"/
-rm -f "$DEST/firmware/kc868/board_secrets.py"   # never ship a board password
+rm -f "$DEST"/firmware/*/board_secrets.py   # never ship a board password
 echo "$SRC" > "$DEST/SOURCE"   # where `facility update` pulls from
 if git -C "$SRC" rev-parse --short HEAD >/dev/null 2>&1; then
     echo "$(git -C "$SRC" describe --always --dirty) ($(date -u +%Y-%m-%dT%H:%MZ))" > "$DEST/VERSION"

@@ -210,7 +210,7 @@ border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--mute);font
 <script>
 const cols={door_event:["received","ts","section","type","source","reason","duration_s"],
  alert:["received","ts","section","subtype","repeat","duration_s","metrics","snapshot"],
- sensor:["received","ts","tvoc","eco2","aqi","temperature","humidity","nh3_ppm","h2s_ppm","camera"],
+ sensor:["received","ts","tvoc","tvoc_score","tvoc_level","eco2","aqi","temperature","humidity","nh3_ppm","h2s_ppm","camera"],
  snapshot:["received","ts","name"]};
 const esc=v=>v==null?"":String(typeof v==="object"?JSON.stringify(v):v)
  .replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));

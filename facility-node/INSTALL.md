@@ -206,6 +206,7 @@ This opens `/opt/facility-node/.env` in nano. **Save with Ctrl-O, Enter, then ex
 | Feature | Settings | Guide |
 |---|---|---|
 | Online QR validation | `QR_API_*` | SETUP.md 8a |
+| Air sensors on a WiFi board | `SENSOR_URL` | SETUP.md 4a |
 | Odour alert limits | `ODOUR_*` | SETUP.md 8b |
 | MQ-135 / MQ-136 gas sensors | `MQ=1`, `MQ135_R0`, `MQ136_R0` | SETUP.md 8b |
 | Snapshot upload | `SNAPSHOT_UPLOAD_PATH` | SETUP.md 8c |
@@ -312,6 +313,7 @@ facility status && facility doctor
 | `facility test` | Run the test suite |
 | `facility qr create --label test` | Make an unlock QR (24 h); add `--count 5 --hours 720` for staff codes |
 | `facility qr list` / `facility qr revoke --label test` | List or revoke Pi-made codes |
+| `facility sensor flash` / `upload` / `enable` / `test` | ESP32 air sensor board: flash it, set its WiFi, point the node at it, read it (SETUP.md 4a) |
 | `facility camera` | Set up or change the IP camera: asks for IP, user, password and brand, tests the stream, then saves and restarts. `test` / `show` / `find` to check it |
 | `facility mq read` / `facility mq calibrate` | MQ gas sensor values / clean-air calibration |
 | `facility docs install` / `setup` / `readme` | Read the docs (q to quit) |

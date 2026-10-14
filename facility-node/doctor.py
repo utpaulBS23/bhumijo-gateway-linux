@@ -4,7 +4,7 @@
     facility doctor                 (or: sudo -u facility ./venv/bin/python doctor.py)
 
 Checks .env, the database folder, the relay board (password + exit inputs),
-the camera, the admin backend, the QR API, the I2C sensors, and the running
+the camera, the admin backend, the QR API, the sensors (I2C or WiFi board), and the running
 service. Read-only: it never fires a relay or changes anything.
 Exit code 0 = all required checks passed.
 """
@@ -171,9 +171,12 @@ def check_i2c(r, s):
     except ImportError:
         r.line(FAIL, "smbus2 not installed", "re-run deploy/install.sh")
         return
-    wanted = {0x38: "AHT20 (temp/humidity)", 0x53: "ENS160 (air quality)"}
+    wanted = {} if s.sensor_url else {0x38: "AHT20 (temp/humidity)", 0x53: "ENS160 (air quality)"}
     if s.mq:
         wanted[s.ads1115_addr] = "ADS1115 (MQ gas sensors)"
+    if not wanted:
+        r.line(OK, "nothing to check here", "the air sensors are on the WiFi board")
+        return
     try:
         bus = SMBus(1)
     except (OSError, PermissionError) as e:
@@ -189,6 +192,34 @@ def check_i2c(r, s):
     bus.close()
     if s.mq and not (s.mq135_r0 or s.mq136_r0):
         r.line(WARN, "MQ sensors not calibrated", "facility mq calibrate")
+
+
+def check_sensor_board(r, s):
+    from sensors_camera import HttpSensors
+    r.section(f"Air sensor board ({s.sensor_url})")
+    import requests
+    try:
+        data = requests.get(s.sensor_url, timeout=s.sensor_timeout).json()
+    except (requests.RequestException, ValueError) as e:
+        r.line(FAIL, "not reachable", f"{e}; check its power, WiFi and IP (SETUP.md section 4a)")
+        return
+    if not isinstance(data, dict) or "age_s" not in data:
+        r.line(FAIL, "answers, but not like firmware/air-sensor", repr(data)[:120])
+        return
+    r.line(OK, "reachable", f"up {data.get('uptime_s')} s, reading {data.get('age_s')} s old")
+    got = HttpSensors(s.sensor_url, timeout=s.sensor_timeout).read()
+    if got["temperature"] is None:
+        r.line(FAIL, "AHT20 (temp/humidity) not reading", "check the STEMMA QT cables")
+    else:
+        r.line(OK, f"AHT20 {got['temperature']} °C, {got['humidity']} %")
+    if got["tvoc"] is not None:
+        r.line(OK, f"ENS160 TVOC {got['tvoc']} ppb, eCO2 {got['eco2']} ppm, AQI {got['aqi']}")
+    elif data.get("ens160_validity") == 1:
+        r.line(WARN, "ENS160 warming up", "values follow in ~3 min")
+    elif data.get("ens160_validity") == 2:
+        r.line(WARN, "ENS160 initial start-up", "new sensor: values follow within ~1 h of first power")
+    else:
+        r.line(FAIL, "ENS160 (air quality) not reading", "check the STEMMA QT cables")
 
 
 def check_service(r, s):
@@ -228,6 +259,8 @@ def main(argv=None):
             check_relay(r, s)
             check_camera(r, s)
             check_backend(r, s)
+            if s.sensor_url:
+                check_sensor_board(r, s)
         check_i2c(r, s)
         check_service(r, s)
 

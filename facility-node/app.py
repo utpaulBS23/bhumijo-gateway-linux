@@ -201,7 +201,7 @@ def main():
     from mq import MQSensors
     from odour import OdourMonitor
     from qr_api import QRValidator
-    from sensors_camera import Camera, Sensors, make_snapshotter, run_sensor_loop
+    from sensors_camera import Camera, make_sensors, make_snapshotter, run_sensor_loop
     from store import Store
     from uplink import Uplink
 
@@ -235,7 +235,7 @@ def main():
         lambda: uplink.run_flush_loop(stop),
         lambda: run_exit_poller(s, relay, doors, stop),
         lambda: run_door_ticker(doors, stop),
-        lambda: run_sensor_loop(s, Sensors(), camera, uplink, stop, mq=mq, odour=odour),
+        lambda: run_sensor_loop(s, make_sensors(s), camera, uplink, stop, mq=mq, odour=odour),
         lambda: camera.run_probe_loop(stop),
         lambda: camera.run_frame_loop(stop),
     ]
@@ -248,6 +248,7 @@ def main():
     for d in s.doors:
         log.info("door %s: relay %d, exit input %s, reed GPIO %s, scanners %s",
                  d.name, d.relay, d.exit_input, d.reed_gpio, ", ".join(d.scanner_ips) or "any")
+    log.info("air sensors: %s", s.sensor_url or "I2C on the Pi")
     log.info("odour limits %s; MQ sensors %s; snapshot upload %s", odour.limits or "off",
              "on" if mq else "off", s.snapshot_upload_path or "off")
     log.info("QR validation: %s", f"{s.qr_api_method} {s.qr_api_url} ({s.qr_api_order})"
