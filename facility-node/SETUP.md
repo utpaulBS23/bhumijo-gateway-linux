@@ -24,8 +24,9 @@ Sections 1–3 are shared by all three functions. Follow the steps in order. Eac
                                       │ GPIO27: male reed   GPIO22: female reed
                                       └─► HTTPS (outbound only) ─► Admin backend
 
- 1 Door:   KC868 Relay01 ─► male timer ─► male mag lock    Relay02 ─► female timer ─► female mag lock
-           Exit buttons: pole 1 ─► that door's timer,  pole 2 ─► KC868 Input01 / Input02
+ 1 Door:   12V ─► KC868 Relay01 (NC) ─► male timer (NC) ─► male mag lock     (Relay02 / female the same)
+           QR / app: the KC868 opens the lock for UNLOCK_SECONDS (set in code)
+           Exit buttons: pole 1 ─► that door's timer (own delay),  pole 2 ─► KC868 Input01 / Input02
  2 Camera: RTSP health check every 30 s, frozen-feed check every 5 min, snapshot on door alerts
  3 Odour:  ENS160 ─STEMMA QT─ AHT20 ─STEMMA QT─ ESP32-S3 Feather (or ENS160/AHT20 on the Pi's I2C)
 ```
@@ -45,7 +46,7 @@ Sections 1–3 are shared by all three functions. Follow the steps in order. Eac
 - [ ] KC868-A4S relay board
 - For each door (×2: male and female):
   - [ ] QR scanner with network upload
-  - [ ] Programmable timer relay module
+  - [ ] Timer relay module (e.g. HCW-M421), for the exit button; QR and app unlock times are set in code
   - [ ] 12V magnetic lock (fails open when power is lost)
   - [ ] Dual-pole (DPDT) exit button
   - [ ] MC-38 reed switch (optional; needed for forced-open and propped-open alerts)
@@ -146,18 +147,42 @@ At least one must stay on. Each function's settings stay in `.env` when it is of
 
 ### 4.1 Wiring
 
+A mag lock is **locked while it has power**. Each door's 12V lock power runs through **two NC (normally closed) contacts in series**: the KC868 relay and the timer module's relay. **Either one** opening cuts the power and opens the door:
+
+```
+ 12V + ──► KC868 Relay01 COM→NC ──► timer module relay COM→NC ──► male mag lock ──► 12V −
+              ▲                                ▲
+   QR / app: the Pi asks the KC868      Exit button pole 1 ──► timer trigger
+   to open for UNLOCK_SECONDS           (the timer's own delay; works with the Pi off)
+```
+
+| Event | What cuts the lock power | For how long |
+|---|---|---|
+| QR scan / app button | KC868 relay | `DOOR_<NAME>_UNLOCK_SECONDS` (default 5 s), set in code: `facility door delay male 8` |
+| Exit button | Timer module | The timer's own delay, set on its buttons (e.g. 5 s) |
+| Pi or KC868 off / crashed | — | Nothing: the door stays locked, and the exit button still works |
+| Power cut | — | The lock has no power: it opens (fail-safe) |
+
+The KC868 releases its relay by itself after the unlock time, even if the Pi or the network drops mid-unlock.
+
 **KC868-A4S**
 
 | KC868 terminal | Goes to |
 |---|---|
-| Relay01 COM/NO | **Male** timer module trigger |
-| Relay02 COM/NO | **Female** timer module trigger |
+| Relay01 COM / **NC** | **Male** lock power, in series with the male timer's relay |
+| Relay02 COM / **NC** | **Female** lock power, in series with the female timer's relay |
 | Input01 + GND | **Male** exit button, pole 2 (dry contact) |
 | Input02 + GND | **Female** exit button, pole 2 (dry contact) |
 
+**Timer module (each door, e.g. HCW-M421)**
+
+- Its relay **COM / NC** goes in series in the lock power line (above), so the lock is powered while the timer is idle.
+- Trigger ← exit button pole 1. Mode: triggered → relay on for the set time (on the HCW-M421, mode **P-1**), time e.g. **5 s**.
+- Only the exit button uses it. QR and app unlock times are set in code, not on the timer.
+
 **Exit buttons (each door)**
 
-- **Pole 1** → that door's timer trigger, wired exactly as before. This opens the door in hardware, even with the Pi off.
+- **Pole 1** → that door's timer trigger. This opens the door in hardware, even with the Pi off.
 - **Pole 2** → that door's KC868 input. This only lets the Pi *log* the exit.
 
 **Reed switches (optional), on the Pi header**
@@ -172,11 +197,13 @@ At least one must stay on. Each function's settings stay in `.env` when it is of
 The reed switches go directly to the GPIO pins. No resistor is needed (the code enables the internal pull-up), and no optocoupler.
 Mount each reed on the door's opening edge, **at least 10 cm from the mag lock**.
 
-✅ **Check:** with the Pi powered off, pressing each exit button releases its own door.
+✅ **Check:**
+- With the Pi powered off, pressing each exit button releases its own door for the timer's delay.
+- With the Pi off, both doors stay **locked** (if one is open, its KC868 contact is on NO instead of NC).
 
 ### 4.2 KC868-A4S firmware
 
-The board needs the patched `firmware/kc868/main.py`. It adds exit-input reporting, returns 401 on a wrong password, and moves the password out of the code.
+The board needs the patched `firmware/kc868/main.py`. It adds the unlock time (`hold`, up to 30 s, released by the board itself), exit-input reporting, returns 401 on a wrong password, and moves the password out of the code.
 
 **1. Tools.** On your laptop, install `mpremote` and connect the board over USB:
 
@@ -218,14 +245,15 @@ mpremote connect /dev/ttyUSB0 cp main.py :main.py + cp board_secrets.py :board_s
 **5. Test from any machine on the LAN.**
 
 ```bash
-curl -i "http://192.168.10.174/sw_ctl.cgi?postpwd=<PASSWORD>&Relay01=ON"   # male door clicks
-curl -i "http://192.168.10.174/sw_ctl.cgi?postpwd=<PASSWORD>&Relay02=ON"   # female door clicks
+curl -i "http://192.168.10.174/sw_ctl.cgi?postpwd=<PASSWORD>&Relay01=ON&hold=5"   # male door opens 5 s
+curl -i "http://192.168.10.174/sw_ctl.cgi?postpwd=<PASSWORD>&Relay02=ON&hold=5"   # female door opens 5 s
 curl -i "http://192.168.10.174/sw_ctl.cgi?postpwd=wrong&Relay01=ON"        # 401, nothing clicks
 curl "http://192.168.10.174/input_ctl.cgi?postpwd=<PASSWORD>"              # hold male exit button
 ```
 
 ✅ **Check:**
-- Each relay releases its own door.
+- Each relay releases its own door, for the `hold` time.
+- `input_ctl.cgi` ends its relay list with `MaxHold=30` (the new firmware).
 - A wrong password returns `401`.
 - `Input01=ON` while the male exit button is held, and `Input02=ON` for the female one.
 - If pressed reads `OFF` and released reads `ON`, delete the `not` in `read_inputs()` and upload again.
@@ -247,11 +275,24 @@ DOOR_FEMALE_RELAY=2
 DOOR_FEMALE_EXIT_INPUT=1
 DOOR_FEMALE_REED_GPIO=22
 DOOR_FEMALE_SCANNER_IPS=192.168.10.102
+# QR / app unlock time in seconds (1-30)
+DOOR_MALE_UNLOCK_SECONDS=5
+DOOR_FEMALE_UNLOCK_SECONDS=5
 # 0 until the reed switches are fitted
 REED=1
 ```
 
-✅ **Check:** `facility doctor door` shows both doors, `reachable, password accepted` for the relay, and `0 problem(s)`.
+**Change the unlock time** at any time, without editing the file:
+
+```bash
+facility door                   # each door's relay and unlock time
+facility door delay male 8      # male door opens 8 s per QR / app unlock
+facility door delay all 5       # every door
+```
+
+It saves the time, restarts the service and shows the new value. It never fires a relay: check it with a real scan.
+
+✅ **Check:** `facility doctor door` shows both doors with their unlock time, `reachable, password accepted` and `unlock time supported` for the relay, and `0 problem(s)`.
 
 ### 4.4 QR scanners
 
@@ -311,9 +352,28 @@ Each code:
 facility qr create --label test --hours 24 --token <token>
 ```
 
-### 4.6 Online QR validation (optional)
+### 4.6 Online QR validation and paid entry
 
 By default the Pi checks codes against the token list it pulls every 5 minutes. To also ask your backend live, for example for tickets bought a minute ago or for instant revocation, set `QR_API_*` in `.env`.
+
+**Paid entry (the backend charges per scan).** Use `QR_API_ORDER=api_only`: every scan goes to the backend, which checks the user's balance and charges in the same call. The Pi opens only on its "yes":
+
+| Situation | QR scan |
+|---|---|
+| Internet up, enough balance | Opens; `entry` logged with `scan_id` |
+| Internet up, no balance | Refused; `denied`, `api_reason: insufficient_balance` |
+| **No internet / backend down** | **Refused**; `denied`, `reason: offline` |
+| Scanner sends the same code again within 10 s | Same scan: no second charge, the door just stays open |
+| Backend charged, but the relay failed | `relay_failed` with `scan_id` is sent so the backend refunds |
+| Pi-made staff code (`facility qr`), Facility app, exit button | Open as always, also offline (no charge) |
+
+```ini
+QR_API_URL=/qr/validate          # the backend's check-and-charge API
+QR_API_ORDER=api_only
+QR_API_TIMEOUT=3
+```
+
+Because paid entry now needs the internet, give the router a **backup connection (4G/LTE failover SIM)**, and watch `facility health` → `qr_api.last_ok` / `last_error`. The backend must charge each `scan_id` only once and refund on `relay_failed` (README section 8, "Paid entry").
 
 **Match your backend's API**
 
@@ -328,11 +388,14 @@ By default the Pi checks codes against the token list it pulls every 5 minutes. 
 | Replies `{"status":"granted"}` | `QR_API_ALLOW_FIELD=status` (`granted` is already an allow value) |
 | Refuses with HTTP 403 | Already counted as "refused" (`QR_API_DENY_STATUS`) |
 | Has its own key, not the admin key | `QR_API_AUTH=0` and put the key in `QR_API_EXTRA` |
+| Refuses with HTTP 402 and `{"reason": "insufficient_balance"}` | Already handled (402 is a refusal; `QR_API_REASON_FIELD=reason`) |
+| Calls the scan id `request_id` | `QR_API_SCAN_ID_FIELD=request_id` (it is always sent as `Idempotency-Key` too) |
 
 **Pick the order**
 
 - **`QR_API_ORDER=local_first`** (recommended): codes in the cache open instantly, and only unknown codes go to the API. With the internet down, every cached code still opens.
 - **`QR_API_ORDER=api_first`:** every scan asks the API first, and a "no" from the API beats the cache, so revocation takes effect immediately. If the API doesn't answer within `QR_API_TIMEOUT` (3 s), the cache decides. Each scan can wait up to that long.
+- **`QR_API_ORDER=api_only`:** paid entry, as above. The API decides every scan, and without it no QR opens.
 
 Codes made with `facility qr` always open locally, in both modes.
 
@@ -394,10 +457,13 @@ Run every test for **both doors**. Tick each column.
 |---|---|---|---|---|
 | D1 | `curl sw_ctl.cgi … RelayNN=ON` | Only this door releases | ☐ | ☐ |
 | D2 | Hold exit button, `curl input_ctl.cgi` | Only this door's `InputNN=ON` | ☐ | ☐ |
-| D3 | Show a valid QR (section 4.5) | This door opens; `entry` logged with `section` | ☐ | ☐ |
+| D3 | Show a valid QR (section 4.5) | This door opens for its unlock time (time it); `entry` logged with `section` | ☐ | ☐ |
 | D4 | Show an invalid QR | Stays locked; `denied` logged | ☐ | ☐ |
 | D5 | Facility app open with `door` set | Only that door opens; `attendant` logged | ☐ | ☐ |
-| D6 | Press exit button | Door opens (hardware); `exit` logged once | ☐ | ☐ |
+| D5b | *Paid entry:* scan a code with balance, then one without | Opens once, balance goes down by one; the second is refused with `insufficient_balance` | ☐ | ☐ |
+| D5c | *Paid entry:* unplug the router WAN, scan a paid code | Refused (`reason: offline`); a staff code and the app still open | ☐ | ☐ |
+| D6 | Press exit button | Door opens for the timer's delay (hardware); `exit` logged once | ☐ | ☐ |
+| D6b | `facility door delay <door> 10`, then D3 again | Opens for 10 s; set it back afterwards | ☐ | ☐ |
 | D7 | Open the door by hand, no trigger (reed fitted) | `forced_open` alert (+ snapshot if the camera is on) | ☐ | ☐ |
 | D8 | Hold the door open > 5 min | `propped_open`, repeats every 3 min, `propped_resolved` on close | ☐ | ☐ |
 | D9 | Pi powered off, press exit button | Door still releases (hardware fail-safe) | ☐ | ☐ |
@@ -414,9 +480,15 @@ Then **revoke the test codes**: `facility qr revoke --label test`.
 | Scan → `404 doors_off` | `ENABLE_DOORS=0`: `facility feature door on` |
 | Valid QR denied | The code expired, or the token pull hasn't run (`/health` → `tokens`, `last_pull`) |
 | New tickets denied until the next pull | Turn on online validation (section 4.6) |
+| Paid QR refused with `reason: offline` | No internet or backend down (`facility health` → `qr_api.last_error`). By design with `api_only`; staff codes and the app still open |
+| Paid QR refused with `api_reason: insufficient_balance` | The user must top up; the backend decides |
+| Charged twice for one entry | The backend isn't de-duplicating `scan_id` / `Idempotency-Key` (README section 8) |
 | `QR API unavailable` in the log | Wrong `QR_API_URL`, backend down, or a 401 (check `QR_API_AUTH` / the key). `/health` → `qr_api.last_error` |
 | API always denies | `QR_API_ALLOW_FIELD` doesn't match the reply. Run the dummy API to see the request, and compare with the backend's real reply |
 | Door doesn't open, log shows `relay failed … wrong relay password` | `RELAY_PWD` ≠ the board's `POST_PASSWORD` |
+| Door opens only ~1 s, whatever the unlock time | Old KC868 firmware ignores `hold`: `facility doctor door` says `firmware has no unlock time`. Flash it (section 4.2) |
+| Door stays open while the Pi is off, or never locks | A KC868 or timer contact is wired to **NO** instead of **NC** (section 4.1) |
+| `unlock time … not in 1-30 s` at start | `DOOR_*_UNLOCK_SECONDS` out of range: `facility door delay <door> 5` |
 | Door opens but no `exit` logged | `relay firmware does not report inputs` → firmware not flashed, wrong `PCF8574_INPUT_ADDR`, or polarity (section 4.2, step 5) |
 | Wrong door logs the exit | `DOOR_*_EXIT_INPUT` swapped |
 | False `forced_open` alerts | Reed too close to the mag lock, or polarity: set `REED_ACTIVE_HIGH=1` |
@@ -721,7 +793,7 @@ First run the tests of each function that is on: **door** (4.8), **camera** (5.3
 | # | Test | Expected | ☐ |
 |---|---|---|---|
 | S1 | `facility doctor` | `0 problem(s)`; `functions` shows what this site has | ☐ |
-| S2 | Unplug the router WAN, repeat D3 + D5 | Doors still open offline | ☐ |
+| S2 | Unplug the router WAN, repeat D3 + D5 | Doors still open offline (with paid entry, D3 is refused instead: D5c) | ☐ |
 | S3 | Reconnect WAN | `/health` queue drains to 0; events reach admin | ☐ |
 | S4 | Power-cycle the Pi | Service auto-starts; queue survives | ☐ |
 
@@ -735,6 +807,7 @@ First run the tests of each function that is on: **door** (4.8), **camera** (5.3
 | Health | `facility health` |
 | Check everything / one function | `facility doctor` / `facility doctor door` (`camera`, `odour`) |
 | Functions on/off | `facility feature` / `facility feature camera off` |
+| Door unlock time | `facility door` / `facility door delay male 8` |
 | Restart | `facility restart` |
 | Update code | `facility update` (keeps `.env` and the DB) |
 | Back up per site | `/opt/facility-node/.env` + the relay board's `board_secrets.py` + `PCF8574_INPUT_ADDR` value |

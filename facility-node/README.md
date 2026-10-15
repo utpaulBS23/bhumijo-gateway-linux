@@ -77,6 +77,7 @@ Inside the Pi, a single Python service (`facility-node`, run by systemd). Each f
 | Function | Feature | What it does |
 |---|---|---|
 | 1 Door | **QR unlock** | Each scanner opens its own door (routed by scanner IP). Checked against the local cache, optionally plus a live **QR validation API**. Any valid code opens either door |
+| 1 Door | **Paid entry** | `QR_API_ORDER=api_only`: every scan is checked online, so the backend can check the balance and charge. No internet = QR refused. One charge per scan (`scan_id`), a refund request if the door then fails to open |
 | 1 Door | **Facility app unlock** | Attendant phone sends the per-facility **Auth Code** and the door name |
 | 1 Door | **Pi-made QR codes** | `facility qr create`: test, staff and commissioning codes that expire after 24 h by default |
 | 1 Door | **Exit tracking** | Exit button opens the door in hardware; a second contact into the KC868 lets the Pi log an `exit` |
@@ -148,10 +149,12 @@ All of these are static and **outside the DHCP pool**. Only phones use DHCP.
 
 ### Door map (default `.env`)
 
-| Door | Scanner | Relay | Exit input | Reed GPIO (pin) |
-|---|---|---|---|---|
-| male | .101 | Relay01 | Input01 | 27 (pin 13) |
-| female | .102 | Relay02 | Input02 | 22 (pin 15) |
+| Door | Scanner | Relay | Exit input | Reed GPIO (pin) | Unlock time |
+|---|---|---|---|---|---|
+| male | .101 | Relay01 | Input01 | 27 (pin 13) | 5 s |
+| female | .102 | Relay02 | Input02 | 22 (pin 15) | 5 s |
+
+Each door's lock power runs through the KC868 relay's NC contact **and** the timer module's NC contact, in series: QR and app unlocks use the KC868 (time set in code), the exit button uses the timer module (its own delay, works with the Pi off). Wiring: SETUP.md section 4.1.
 
 ---
 
@@ -165,15 +168,18 @@ Sections 5.1–5.3 are the door function, 5.4 the odour function.
 2. **Read the code:** from JSON (`token`, `SCode`, `cardid`, `code`…), form fields, the query string, or a plain-text body.
 3. **Validate:**
 
-| Code | No QR API | `QR_API_ORDER=local_first` (default) | `api_first` |
-|---|---|---|---|
-| Pi-made (`facility qr`) | ✓ local | ✓ local | ✓ local |
-| In backend cache | ✓ | ✓, no API call | API decides; cache only if API down |
-| Not cached | ✗ | API decides; ✗ if API down | API decides; ✗ if API down |
+| Code | No QR API | `QR_API_ORDER=local_first` (default) | `api_first` | `api_only` (paid entry) |
+|---|---|---|---|---|
+| Pi-made (`facility qr`) | ✓ local | ✓ local | ✓ local | ✓ local (staff codes, no charge) |
+| In backend cache | ✓ | ✓, no API call | API decides; cache only if API down | API decides; **✗ if API down** |
+| Not cached | ✗ | API decides; ✗ if API down | API decides; ✗ if API down | API decides; ✗ if API down |
 
-4. **Fire the relay**, then log a door-event:
+Every API call carries a fresh `scan_id`. A scanner repeating the same code at the same door within `QR_DEDUP_SECONDS` (10 s) is the same scan: no second API call (no second charge) and no second event; an open door just stays open longer.
+
+4. **Open the door:** the Pi asks the KC868 to hold this door's relay for `DOOR_<NAME>_UNLOCK_SECONDS` (default 5 s), which cuts the lock's power; the board releases it by itself. Then it logs a door-event:
    - `entry` with `source` = `qr` (cache), `qr_api` (approved online) or `qr_local` (Pi-made);
-   - or `denied` with `reason` = `unknown`, `api_denied` or `empty`.
+   - or `denied` with `reason` = `unknown`, `api_denied` (plus the backend's `api_reason`, e.g. `insufficient_balance`), `offline` (`api_only` with the API unreachable) or `empty`;
+   - or, if the relay fails after the backend approved (charged) the scan, `relay_failed` with its `scan_id`, so the backend can refund.
 
 ### 5.2 Facility app
 
@@ -221,8 +227,9 @@ All settings live in `/opt/facility-node/.env`, loaded by systemd. **`.env.examp
 | shared | HTTP | `HOST`, `PORT` | |
 | 1 Door | Relay | `RELAY_URL`, `RELAY_PWD` | `RELAY_PWD` required while doors are on |
 | 1 Door | Doors | `DOORS`, `DOOR_<NAME>_RELAY`, `_EXIT_INPUT`, `_REED_GPIO`, `_SCANNER_IPS`, `EXIT_POLL_INTERVAL` | e.g. `DOORS=male,female` |
+| 1 Door | Unlock time | `UNLOCK_SECONDS` (all doors), `DOOR_<NAME>_UNLOCK_SECONDS` | 1–30 s, default 5; `facility door delay male 8` |
 | 1 Door | Reed | `REED`, `REED_ACTIVE_HIGH`, `PROPPED_THRESHOLD`, `PROPPED_REPEAT`, `CLASSIFY_WINDOW` | |
-| 1 Door | QR validation | `QR_API_URL`, `_METHOD`, `_ORDER`, `_TIMEOUT`, `_AUTH`, `_TOKEN_FIELD`, `_FACILITY_FIELD`, `_DOOR_FIELD`, `_EXTRA`, `_ALLOW_FIELD`, `_ALLOW_VALUES`, `_DENY_STATUS` | off when `QR_API_URL` is empty |
+| 1 Door | QR validation | `QR_API_URL`, `_METHOD`, `_ORDER`, `_TIMEOUT`, `_AUTH`, `_TOKEN_FIELD`, `_FACILITY_FIELD`, `_DOOR_FIELD`, `_EXTRA`, `_ALLOW_FIELD`, `_ALLOW_VALUES`, `_DENY_STATUS`, `_SCAN_ID_FIELD`, `_REASON_FIELD`, `QR_DEDUP_SECONDS` | off when `QR_API_URL` is empty; `QR_API_ORDER=api_only` = paid entry |
 | 1 Door | Bench test | `DOOR_TEST_ENDPOINTS` | keep `0` in production |
 | 2 Camera | Camera | `CAM_HOST`, `CAM_PORT`, `CAM_RTSP`, `CAM_PROBE_INTERVAL`, `CAM_FRAME_INTERVAL` | set with `facility camera` |
 | 2 Camera | Snapshots | `SNAPSHOT_DIR`, `SNAPSHOT_UPLOAD_PATH`, `SNAPSHOT_KEEP_DAYS` | upload off when the path is empty |
@@ -279,10 +286,11 @@ Values are `null` when a sensor is warming up, failed, or not fitted. `tvoc_scor
 
 | `type` | Extra fields |
 |---|---|
-| `entry` | `source`: `qr` \| `qr_api` \| `qr_local` |
+| `entry` | `source`: `qr` \| `qr_api` \| `qr_local`; `scan_id` when the API approved it |
 | `attendant` | `source`: `facility_app` |
 | `exit` | `source`: `exit_button` |
-| `denied` | `source`: `qr` \| `facility_app`; `reason` (QR only) |
+| `denied` | `source`: `qr` \| `facility_app`; `reason` (QR only: `unknown`, `api_denied`, `offline`, `empty`); `api_reason` and `scan_id` when the API refused |
+| `relay_failed` | `source`, `scan_id`: the API approved (charged) this scan but the relay failed: **refund it** |
 | `door_closed` | `duration_s` |
 
 ### Push alert: `POST ALERT_PATH` (per anomaly)
@@ -311,7 +319,16 @@ The reply **replaces** the cache, so an empty list revokes everything. `expiresA
 
 ### Optional: QR validation (`QR_API_URL`)
 
-Default request: `POST {"token": "…", "facility": "…", "door": "male"}`. Default reply: `{"allowed": true}`.
+Default request: `POST {"token": "…", "facility": "…", "door": "male", "scan_id": "<uuid>"}`, with header `Idempotency-Key: <scan_id>`. Default reply: `{"allowed": true}`, or `{"allowed": false, "reason": "insufficient_balance"}` (HTTP 200 or 402).
+
+**Paid entry (`QR_API_ORDER=api_only`), what the backend must do:**
+- Check the balance and **charge in the same call**, then reply `allowed`.
+- **Charge each `scan_id` once.** Asked again with the same `scan_id` (a lost reply), return the first answer without charging again.
+- **Refund** a scan when a `relay_failed` door-event with its `scan_id` arrives. Ideally also when no `entry` with that `scan_id` arrives within a few minutes (the Pi crashed mid-scan).
+- Put the refusal reason in `reason` (`insufficient_balance`, `expired`, …); the Pi logs it as `api_reason`.
+
+`dev/dummy_backend.py` does all of this (`--balance N`), for testing.
+
 The method, field names, extra fields, reply field, allow values and deny status codes are all configurable (`QR_API_*`). A timeout, network error, 5xx or 401 means "unavailable", and the cache decides. **[SETUP.md](SETUP.md) section 4.6** shows how to match an existing backend.
 
 ### Optional: snapshot upload (`SNAPSHOT_UPLOAD_PATH`)
@@ -334,7 +351,7 @@ Multipart `POST` with field `file` (image/jpeg) plus form fields `id`, `facility
 |---|---|
 | Internet / backend down | Cached and Pi-made codes open; Facility app opens; events queue in SQLite |
 | Backend back | Queue drains oldest-first; nothing lost |
-| QR API down | Falls back to the cache within `QR_API_TIMEOUT` (3 s) |
+| QR API down | `local_first` / `api_first`: falls back to the cache within `QR_API_TIMEOUT` (3 s). `api_only` (paid entry): **QR refused** (`reason: offline`); Pi-made staff codes, the Facility app and the exit buttons still open |
 | Relay board down | Unlock returns `502`, nothing is logged as entry; exit buttons still work in hardware |
 | Pi off or crashed | Exit buttons and locks work in hardware; the watchdog reboots a hung Pi; the service auto-restarts |
 | Power cut | Locks fail open (safe); the UPS keeps the Pi, router and camera up; SQLite WAL survives hard cuts |
@@ -366,6 +383,7 @@ Data on the Pi (`/var/lib/facility/`):
 |---|---|
 | Is it healthy? | `facility doctor` · `facility doctor door` (`camera`, `odour`) · `facility health` |
 | Functions on/off | `facility feature` · `facility feature camera off` |
+| Door unlock time | `facility door` · `facility door delay male 8` |
 | Live log | `facility logs` |
 | Restart | `facility restart` |
 | Change settings | `facility config` |
@@ -385,7 +403,7 @@ Runs on any machine with Python 3.9+. No Pi or hardware is needed for the tests.
 ```bash
 cd facility-node
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python test_door.py            # 129 tests
+.venv/bin/python test_door.py            # 145 tests
 ```
 
 The test suite fakes the relay, the backend and the clock. It covers:
@@ -414,7 +432,7 @@ facility-node/
 ├── doctor.py           (shared) Installation self-check, per function
 ├── door/               1. Door lock / unlock
 │   ├── controller.py   Per-door unlock decisions, classification, propped/forced alerts
-│   ├── relay.py        KC868-A4S HTTP client
+│   ├── relay.py        KC868-A4S HTTP client (relay hold = unlock time)
 │   ├── inputs.py       Reed switches (gpiozero/lgpio), exit-input poller, door ticker
 │   ├── qr_api.py       Configurable online QR validation
 │   └── qr_tool.py      Pi-made unlock QR codes CLI (facility qr)
@@ -434,6 +452,7 @@ facility-node/
 │   ├── uninstall.sh
 │   ├── facility        `facility` helper command
 │   ├── feature.sh      `facility feature`: switch a function on/off
+│   ├── door-setup.sh   `facility door`: unlock time per door
 │   ├── camera-setup.sh `facility camera`
 │   ├── sensor-setup.sh `facility sensor`
 │   └── facility-node.service
@@ -441,7 +460,7 @@ facility-node/
 │   ├── main.py         ESP32-S3 + ENS160/AHT20 over WiFi: GET /sensor (MicroPython)
 │   └── board_secrets.py.example  WiFi name, password and IP (real file stays on the board)
 ├── firmware/kc868/        (1. door)
-│   ├── main.py         Patched relay firmware (MicroPython)
+│   ├── main.py         Patched relay firmware (MicroPython): hold time, inputs, 401
 │   └── board_secrets.py.example
 ├── dev/
 │   ├── dummy_backend.py Dummy admin backend: all APIs + dashboard (testing only)

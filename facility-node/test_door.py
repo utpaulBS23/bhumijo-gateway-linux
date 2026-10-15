@@ -66,12 +66,14 @@ class Clock:
 class FakeRelay:
     def __init__(self, fail=False):
         self.fired = []
+        self.holds = []
         self.fail = fail
 
-    def fire(self, channel=1):
+    def fire(self, channel=1, hold=None):
         if self.fail:
             raise RelayError("down")
         self.fired.append(channel)
+        self.holds.append(hold)
 
 
 class FakeUplink:
@@ -1168,6 +1170,90 @@ class QRApiDoorTests(unittest.TestCase):
         self.assertEqual(settings().qr_api_url, "", "off by default")
 
 
+class PaidEntryTests(unittest.TestCase):
+    """QR_API_ORDER=api_only: every QR is checked (and charged) online."""
+
+    def door(self, replies, order="api_only", **env):
+        from door.qr_api import QRValidator
+        s = qr_settings(env={"QR_API_ORDER": order, **env})
+        store = Store(":memory:")
+        store.replace_tokens([("cached", None)])
+        store.add_local_token("fn-staff-code-0001", "staff", None)
+        replies = iter(replies)
+
+        def reply(data):
+            r = next(replies)
+            if r == "down":
+                raise requests.ConnectionError("down")
+            return r
+
+        sess = StubQRSession(reply)
+        relay, up, clock = FakeRelay(), FakeUplink(), Clock()
+        d = DoorController(s, MAIN, store, relay, up, spawn=lambda fn: fn(), clock=clock,
+                           qr_api=QRValidator(s, session=sess))
+        return d, relay, up, sess, clock
+
+    def test_allowed_scan_carries_scan_id(self):
+        d, relay, up, sess, _ = self.door([FakeResp(200, {"allowed": True})])
+        self.assertEqual(d.qr("paid-ticket"), "opened")
+        _, _, body, headers, _ = sess.calls[0]
+        ev = up.of("door_event")[0]
+        self.assertTrue(body["scan_id"])
+        self.assertEqual((headers["Idempotency-Key"], ev["scan_id"], ev["source"]),
+                         (body["scan_id"], body["scan_id"], "qr_api"))
+
+    def test_no_balance_denied_with_reason(self):
+        d, relay, up, _, _ = self.door([
+            FakeResp(402, {"allowed": False, "reason": "insufficient_balance"}),
+            FakeResp(200, {"allowed": False, "reason": "expired"})])
+        self.assertEqual(d.qr("poor"), "denied")
+        self.assertEqual(d.qr("old"), "denied")
+        self.assertEqual([(e["reason"], e["api_reason"]) for e in up.of("door_event")],
+                         [("api_denied", "insufficient_balance"), ("api_denied", "expired")])
+        self.assertEqual(relay.fired, [])
+
+    def test_offline_refuses_even_cached_codes(self):
+        d, relay, up, _, _ = self.door(["down"])
+        self.assertEqual(d.qr("cached"), "denied", "no internet = no balance check = no entry")
+        self.assertEqual((up.of("door_event")[0]["reason"], relay.fired), ("offline", []))
+
+    def test_staff_codes_still_open_offline(self):
+        d, relay, _, sess, _ = self.door([])
+        self.assertEqual(d.qr("fn-staff-code-0001"), "opened")
+        self.assertEqual((sess.calls, relay.fired), ([], [1]))
+
+    def test_scanner_repeat_is_one_charge(self):
+        d, relay, up, sess, clock = self.door([FakeResp(200, {"allowed": True})] * 2)
+        self.assertEqual(d.qr("t1"), "opened")
+        clock.advance(3)
+        self.assertEqual(d.qr("t1"), "opened", "repeat keeps the door open")
+        self.assertEqual((len(sess.calls), relay.fired, len(up.of("door_event"))), (1, [1, 1], 1))
+        clock.advance(11)
+        self.assertEqual(d.qr("t1"), "opened")
+        self.assertEqual(len(sess.calls), 2, "a real second scan is a second charge")
+        self.assertNotEqual(sess.calls[0][2]["scan_id"], sess.calls[1][2]["scan_id"])
+
+    def test_repeat_of_a_refusal_skips_the_api(self):
+        d, _, up, sess, clock = self.door([FakeResp(402, {"reason": "insufficient_balance"})])
+        d.qr("poor")
+        clock.advance(2)
+        self.assertEqual(d.qr("poor"), "denied")
+        self.assertEqual((len(sess.calls), len(up.of("door_event"))), (1, 1))
+
+    def test_relay_failure_after_charge_asks_for_refund(self):
+        d, relay, up, sess, _ = self.door([FakeResp(200, {"allowed": True})])
+        relay.fail = True
+        self.assertEqual(d.qr("paid"), "relay_error")
+        ev = up.of("door_event")[0]
+        self.assertEqual((ev["type"], ev["scan_id"]), ("relay_failed", sess.calls[0][2]["scan_id"]))
+
+    def test_api_only_needs_the_api(self):
+        with self.assertRaises(ConfigError):
+            settings({"QR_API_ORDER": "api_only"})
+        self.assertEqual(settings({"QR_API_ORDER": "api_only", "ENABLE_DOORS": "0"}).qr_api_order,
+                         "api_only", "doors off: nothing to check")
+
+
 class DummyApiTests(unittest.TestCase):
     def test_dummy_api_end_to_end(self):
         import sys
@@ -1293,6 +1379,32 @@ class DummyBackendTests(unittest.TestCase):
         self.c.post("/admin/outage?on=0")
         self.assertEqual(self.c.get("/api/facility/tokens?facility=f", headers=self.H).status_code, 200)
 
+    def test_paid_entry_against_dummy(self):
+        """Balance, one charge per scan_id, refund on relay_failed: the real
+        backend's job, shown by the dummy."""
+        from door.qr_api import QRValidator
+        self.app = __import__("dummy_backend").create_app(data_dir=self.tmp.name, quiet=True,
+                                                         balance=1)
+        self.c = self.app.test_client()
+        s = settings({"ADMIN_URL": "http://127.0.0.1:8091/api", "ADMIN_KEY": "dummy-key",
+                      "QR_API_URL": "/qr/validate", "QR_API_ORDER": "api_only"})
+        bridge = self.bridge()
+        v = QRValidator(s, session=bridge, auth_headers=self.H)
+        self.assertEqual(v.check_detail("DUMMY-ALLOW-0001", "male", "scan-1"), ("allow", None))
+        self.assertEqual(v.check_detail("DUMMY-ALLOW-0001", "male", "scan-1"), ("allow", None),
+                         "same scan again: same answer")
+        self.assertEqual(v.check_detail("DUMMY-ALLOW-0001", "male", "scan-2"),
+                         ("deny", "insufficient_balance"))
+        store = Store(":memory:")
+        up = Uplink(s, store, session=bridge)
+        relay = FakeRelay(fail=True)
+        d = DoorController(s, MAIN, store, relay, up, spawn=lambda fn: fn(), qr_api=v)
+        self.assertEqual(self.c.get("/admin/state").json["balance"]["DUMMY-ALLOW-0002"], 1)
+        self.assertEqual(d.qr("DUMMY-ALLOW-0002"), "relay_error")
+        up.flush()
+        self.assertEqual(self.c.get("/admin/state").json["balance"]["DUMMY-ALLOW-0002"], 1,
+                         "relay_failed refunded the charge")
+
     def test_node_end_to_end_against_dummy(self):
         s = settings(env={"ADMIN_URL": "http://127.0.0.1:8091/api", "ADMIN_KEY": "dummy-key",
                           "SNAPSHOT_UPLOAD_PATH": "/facility/snapshot"},
@@ -1366,6 +1478,58 @@ class FeatureTests(unittest.TestCase):
         self.assertIn("doors OFF", out)
         r, s, out = DoctorTests.run_config_check(None, text)
         self.assertGreaterEqual(r.failed, 1)
+
+
+class UnlockTimeTests(unittest.TestCase):
+    """DOOR_<NAME>_UNLOCK_SECONDS: the KC868 holds the lock relay that long."""
+
+    def test_defaults_and_overrides(self):
+        s = settings(TWO_DOORS)
+        self.assertEqual([d.unlock_seconds for d in s.doors], [5.0, 5.0])
+        s = settings(dict(TWO_DOORS, UNLOCK_SECONDS="7", DOOR_MALE_UNLOCK_SECONDS="2.5"))
+        self.assertEqual([d.unlock_seconds for d in s.doors], [2.5, 7.0])
+        self.assertEqual(settings({"UNLOCK_SECONDS": "9"}).doors[0].unlock_seconds, 9.0)
+
+    def test_out_of_range_rejected(self):
+        for v in ("0.5", "31", "-1"):
+            with self.assertRaises(ConfigError, msg=v):
+                settings(dict(TWO_DOORS, DOOR_FEMALE_UNLOCK_SECONDS=v))
+
+    def test_unlock_sends_the_hold(self):
+        doors, relay, _, _, _ = make_doors(dict(TWO_DOORS, DOOR_MALE_UNLOCK_SECONDS="8"))
+        male, female = doors
+        self.assertEqual((male.qr("good"), female.facility_open("auth-code-123")),
+                         ("opened", "opened"))
+        self.assertEqual(list(zip(relay.fired, relay.holds)), [(1, 8.0), (2, 5.0)])
+
+    def test_relay_request(self):
+        calls = []
+        sess = FakeSession()
+        sess.get = lambda url, params=None, timeout=None: calls.append(params) or FakeResp(200, text="ok")
+        Relay("http://r", "pw", session=sess).fire(2, hold=5.0)
+        Relay("http://r", "pw", session=sess).fire(1, hold=2.5)
+        self.assertEqual([(c.get("Relay02") or c.get("Relay01"), c["hold"]) for c in calls],
+                         [("ON", "5"), ("ON", "2.5")])
+
+    def test_firmware_max_hold(self):
+        sess = FakeSession()
+        sess.get = lambda *a, **k: FakeResp(200, text="Relay01=OFF&MaxHold=30&Input01=OFF")
+        self.assertEqual(Relay("http://r", "pw", session=sess).max_hold(), 30.0)
+        sess.get = lambda *a, **k: FakeResp(200, text="Relay01=OFF&Input01=OFF")
+        self.assertIsNone(Relay("http://r", "pw", session=sess).max_hold())
+
+    def test_long_unlock_is_not_forced_open(self):
+        door, _, up, clock, _ = make_door(env={"UNLOCK_SECONDS": "30"}, classify_window=15)
+        door.qr("good")
+        clock.advance(25)          # still inside the 30 s unlock
+        door.door_opened()
+        self.assertEqual(up.of("alert"), [])
+
+    def test_health_shows_unlock_time(self):
+        doors, _, _, _, store = make_doors(TWO_DOORS)
+        s = doors[0].s
+        h = create_app(s, doors, store, Uplink(s, store, session=FakeSession())).test_client().get("/health").json
+        self.assertEqual(h["doors"]["male"]["unlock_s"], 5.0)
 
 
 class MiscTests(unittest.TestCase):

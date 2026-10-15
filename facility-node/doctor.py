@@ -71,8 +71,14 @@ def check_config(r, env_path):
     r.line(OK, "functions", ", ".join(f"{f} {'on' if getattr(s, 'enable_' + f) else 'OFF'}"
                                       for f in FEATURES))
     for d in s.doors:
-        r.line(OK, f"door {d.name}", f"relay {d.relay}, exit input {d.exit_input}, "
+        r.line(OK, f"door {d.name}", f"relay {d.relay}, unlock {d.unlock_seconds:g} s, "
+               f"exit input {d.exit_input}, "
                f"reed GPIO {d.reed_gpio}, scanners {', '.join(d.scanner_ips) or 'any'}")
+    if s.enable_doors:
+        qr_mode = {"api_only": "online only: the backend checks the balance, no internet = QR refused",
+                   "api_first": "backend first, local cache if it is down",
+                   "local_first": "local cache first, backend for unknown codes"}
+        r.line(OK, "QR entry", qr_mode[s.qr_api_order] if s.qr_api_url else "local cache only")
     if s.door_test_endpoints:
         r.line(WARN, "DOOR_TEST_ENDPOINTS=1", "turn off before handover")
     if any(h in s.qr_api_url for h in ("127.0.0.1", "localhost")):
@@ -123,6 +129,19 @@ def check_relay(r, s):
     else:
         held = [f"Input0{i + 1}" for i, v in enumerate(inputs) if v]
         r.line(OK, "inputs reported", "pressed now: " + (", ".join(held) or "none"))
+    try:
+        max_hold = relay.max_hold()
+    except RelayError:
+        return
+    longest = max(d.unlock_seconds for d in s.doors)
+    if max_hold is None:
+        r.line(WARN, "firmware has no unlock time (hold)",
+               "flash firmware/kc868/main.py; until then each unlock is a 1 s pulse")
+    elif longest > max_hold:
+        r.line(FAIL, f"unlock time {longest:g} s is above the board's {max_hold:g} s",
+               "lower DOOR_*_UNLOCK_SECONDS")
+    else:
+        r.line(OK, "unlock time supported", f"board holds up to {max_hold:g} s")
 
 
 def check_camera(r, s):

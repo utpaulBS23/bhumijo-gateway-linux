@@ -21,11 +21,20 @@ Implements the contract in README.md section 8, with the default paths:
     POST /api/facility/door-event             access log
     POST /api/facility/alert                  anomalies
     POST /api/facility/snapshot               multipart JPEG upload
-    POST /api/qr/validate                     online QR check
+    POST /api/qr/validate                     online QR check + charge (paid entry)
 
 Behaves like a well-built backend: checks the auth header, rejects payloads
 missing required fields (422), ignores repeated event ids (returns 200 with
-"duplicate": true), and can simulate an outage (503) to test the Pi's queue:
+"duplicate": true), and can simulate an outage (503) to test the Pi's queue.
+
+Paid entry, like the real backend must do it: each code has a balance
+(--balance, default 3 entries). /api/qr/validate charges one entry per
+scan_id: asking again with the same scan_id gives the same answer and no
+second charge; an empty balance gets 402 {"allowed": false,
+"reason": "insufficient_balance"}. A "relay_failed" door-event refunds the
+charge of its scan_id.
+
+Outage:
 
     curl -XPOST http://127.0.0.1:8091/admin/outage -d on=1    # down
     curl -XPOST http://127.0.0.1:8091/admin/outage -d on=0    # back up
@@ -50,15 +59,17 @@ REQUIRED = {
     "door_event": {"id", "facility", "section", "type", "ts"},
     "alert": {"id", "facility", "type", "subtype", "ts"},
 }
-DOOR_TYPES = {"entry", "attendant", "exit", "denied", "door_closed"}
+DOOR_TYPES = {"entry", "attendant", "exit", "denied", "door_closed", "relay_failed"}
 ALERT_SUBTYPES = {"forced_open", "propped_open", "propped_resolved",
                   "odour_high", "odour_resolved"}
 
 
 class State:
-    def __init__(self, tokens, auth_code, data_dir):
+    def __init__(self, tokens, auth_code, data_dir, balance=3):
         self.lock = threading.Lock()
         self.tokens = list(tokens)
+        self.balance = {t: balance for t in tokens}   # paid entries left per code
+        self.charges = {}                              # scan_id -> (token, allowed, reason)
         self.auth_code = auth_code
         self.data_dir = data_dir
         self.seen_ids = set()
@@ -84,9 +95,10 @@ class State:
 
 
 def create_app(key="dummy-key", tokens=DEFAULT_TOKENS, auth_code="dummy-auth-code",
-               data_dir=os.path.join(HERE, "backend-data"), outage=False, quiet=False):
+               data_dir=os.path.join(HERE, "backend-data"), outage=False, quiet=False,
+               balance=3):
     app = Flask("dummy_backend")
-    st = State(tokens, auth_code, data_dir)
+    st = State(tokens, auth_code, data_dir, balance)
     st.outage = outage
     app.config["state"] = st
 
@@ -118,6 +130,13 @@ def create_app(key="dummy-key", tokens=DEFAULT_TOKENS, auth_code="dummy-auth-cod
         if kind == "alert" and payload["subtype"] not in ALERT_SUBTYPES:
             return jsonify(error=f"unknown alert subtype {payload['subtype']!r}"), 422
         new = st.record(kind, payload)
+        if new and kind == "door_event" and payload["type"] == "relay_failed":
+            with st.lock:   # charged, but nobody got in: refund
+                token, allowed, _ = st.charges.get(payload.get("scan_id"), (None, False, None))
+                if allowed:
+                    st.balance[token] += 1
+                    st.charges[payload["scan_id"]] = (token, False, "refunded")
+                    say(f"REFUND scan {payload['scan_id']}: {token} back to {st.balance[token]}")
         brief = {k: v for k, v in payload.items() if k not in ("id", "facility", "camera", "readings")}
         say(f"{'NEW' if new else 'DUP'} {kind:<10} {json.dumps(brief)[:140]}")
         return jsonify(ok=True, duplicate=not new), 200
@@ -160,9 +179,25 @@ def create_app(key="dummy-key", tokens=DEFAULT_TOKENS, auth_code="dummy-auth-cod
     def qr_validate():
         data = {**request.args.to_dict(), **(request.get_json(silent=True) or {})}
         token = data.get("token")
-        ok = token in st.tokens
-        say(f"QR validate {token!r} door={data.get('door')} -> {'ALLOW' if ok else 'DENY'}")
-        return jsonify(allowed=ok)
+        scan_id = data.get("scan_id") or request.headers.get("Idempotency-Key")
+        with st.lock:
+            if scan_id and scan_id in st.charges:      # same scan asked again
+                _, ok, reason = st.charges[scan_id]
+                note = "repeat, no new charge"
+            elif token not in st.balance:
+                ok, reason, note = False, "unknown_code", ""
+            elif st.balance[token] <= 0:
+                ok, reason, note = False, "insufficient_balance", ""
+            else:
+                st.balance[token] -= 1
+                ok, reason, note = True, None, f"charged, {st.balance[token]} left"
+            if scan_id and scan_id not in st.charges:
+                st.charges[scan_id] = (token, ok, reason)
+        say(f"QR validate {token!r} door={data.get('door')} scan={scan_id} -> "
+            f"{'ALLOW' if ok else 'DENY ' + str(reason)} {note}")
+        if reason == "insufficient_balance":
+            return jsonify(allowed=False, reason=reason), 402
+        return jsonify(allowed=ok, reason=reason)
 
     @app.post("/admin/outage")
     def set_outage():
@@ -175,6 +210,7 @@ def create_app(key="dummy-key", tokens=DEFAULT_TOKENS, auth_code="dummy-auth-cod
     def state():
         with st.lock:
             return jsonify(counts=st.counts, duplicates=st.duplicates, outage=st.outage,
+                           balance=st.balance,
                            recent={k: list(v) for k, v in st.recent.items()})
 
     @app.get("/admin/snapshots/<path:name>")
@@ -245,13 +281,15 @@ def main():
     p.add_argument("--data", default=os.path.join(HERE, "backend-data"),
                    help="where events.jsonl and snapshots are written")
     p.add_argument("--outage", action="store_true", help="start returning 503")
+    p.add_argument("--balance", type=int, default=3, help="paid entries per code")
     args = p.parse_args()
     tokens = args.token or DEFAULT_TOKENS
     print(f"Dummy backend on http://{args.host}:{args.port}  (dashboard at /)\n"
           f"  ADMIN_URL=http://{args.host}:{args.port}/api   ADMIN_KEY={args.key}\n"
           f"  tokens: {', '.join(tokens)}   authCode: {args.auth_code}\n"
           f"  data: {args.data}")
-    create_app(args.key, tokens, args.auth_code, args.data, args.outage).run(
+    create_app(args.key, tokens, args.auth_code, args.data, args.outage,
+               balance=args.balance).run(
         host=args.host, port=args.port, threaded=True)
 
 

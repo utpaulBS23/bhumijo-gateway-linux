@@ -1,8 +1,10 @@
 """KC868-A4S relay board client (firmware/kc868/main.py).
 
-- sw_ctl.cgi?postpwd=..&Relay01=ON  fires a relay; firmware auto-offs after 1s,
-  so the Pi only ever sends ON.
-- input_ctl.cgi?postpwd=..          returns "Relay01=OFF&...&Input01=ON&..."
+- sw_ctl.cgi?postpwd=..&Relay01=ON&hold=5  holds a relay for 5 s; the firmware
+  releases it by itself (1 s without hold, 30 s at most), so the Pi only ever
+  sends ON and a lost connection can't leave a door open.
+- input_ctl.cgi?postpwd=..          returns "Relay01=OFF&...&Input01=ON&...&MaxHold=30"
+  (MaxHold only from firmware that supports hold)
 """
 
 import logging
@@ -50,15 +52,30 @@ class Relay:
             raise RelayError(f"{path}: HTTP {resp.status_code}")
         return resp.text
 
-    def fire(self, channel=1):
-        """Pulse relay `channel` (1-4). Raises RelayError on failure."""
+    def fire(self, channel=1, hold=None):
+        """Switch relay `channel` (1-4) on for `hold` seconds (None = the
+        firmware's 1 s pulse). Raises RelayError on failure."""
         if not 1 <= channel <= 4:
             raise ValueError(f"relay channel {channel} out of range")
-        self._get("sw_ctl.cgi", {"postpwd": self.password, f"Relay0{channel}": "ON"})
-        log.info("relay %d fired", channel)
+        params = {"postpwd": self.password, f"Relay0{channel}": "ON"}
+        if hold is not None:
+            params["hold"] = f"{hold:g}"
+        self._get("sw_ctl.cgi", params)
+        log.info("relay %d on%s", channel, f" for {hold:g} s" if hold is not None else "")
 
     def states(self):
         return parse_states(self._get("input_ctl.cgi", {"postpwd": self.password}))
+
+    def max_hold(self):
+        """Longest hold (s) the firmware accepts, or None if it predates hold."""
+        for part in self._get("input_ctl.cgi", {"postpwd": self.password}).strip().split("&"):
+            key, _, value = part.partition("=")
+            if key.strip() == "MaxHold":
+                try:
+                    return float(value)
+                except ValueError:
+                    return None
+        return None
 
     def read_inputs(self):
         """[bool x4] for Input01..04, or None if firmware does not report inputs."""

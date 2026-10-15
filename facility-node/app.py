@@ -193,6 +193,7 @@ def create_app(settings, doors, store, uplink, camera=None, limiter=None, odour=
             last_pull=uplink.last_pull_ok,
             last_flush=uplink.last_flush_ok,
             doors={d.name: {"open": d.is_open, "relay": d.door.relay,
+                            "unlock_s": d.door.unlock_seconds,
                             "scanners": list(d.door.scanner_ips)} for d in doors},
             reed=settings.reed,
             camera=camera.snapshot_status() if camera else None,
@@ -266,8 +267,9 @@ def main():
     log.info("functions: doors %s, camera %s, odour %s",
              on(s.enable_doors), on(s.enable_camera), on(s.enable_odour))
     for d in s.doors:
-        log.info("door %s: relay %d, exit input %s, reed GPIO %s, scanners %s",
-                 d.name, d.relay, d.exit_input, d.reed_gpio, ", ".join(d.scanner_ips) or "any")
+        log.info("door %s: relay %d, unlock %g s, exit input %s, reed GPIO %s, scanners %s",
+                 d.name, d.relay, d.unlock_seconds, d.exit_input, d.reed_gpio,
+                 ", ".join(d.scanner_ips) or "any")
     if doors:
         log.info("QR validation: %s", f"{s.qr_api_method} {s.qr_api_url} ({s.qr_api_order})"
                  if qr_api else "local cache only")

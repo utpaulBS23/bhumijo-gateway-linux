@@ -209,6 +209,7 @@ Or later, without editing the file: `facility feature camera off`. The settings 
 | `RELAY_URL` | `http://192.168.10.174` | doors: the relay has another IP |
 | `CAM_HOST` / `CAM_RTSP` | `.149` / example URL | camera: always; set them with `facility camera` |
 | `DOORS` + `DOOR_MALE_*` / `DOOR_FEMALE_*` | male: Relay01/Input01/GPIO27/.101, female: Relay02/Input02/GPIO22/.102 | wiring or scanner IPs differ |
+| `DOOR_MALE_UNLOCK_SECONDS` / `DOOR_FEMALE_UNLOCK_SECONDS` | `5` | the doors should stay open longer or shorter per QR / app unlock (1–30 s; or `facility door delay male 8`) |
 | `REED` | `0` | set `1` once the reed switches are fitted |
 | `ADMIN_AUTH_HEADER` / `ADMIN_AUTH_SCHEME` | `Authorization` / `Bearer` | the backend uses another header (e.g. `X-API-Key` with an empty scheme) |
 | `SENSOR_PATH`, `DOOR_EVENT_PATH`, `ALERT_PATH`, `TOKENS_PATH` | `/facility/...` | the backend uses other paths |
@@ -217,7 +218,7 @@ Or later, without editing the file: `facility feature camera off`. The settings 
 
 | Feature | Settings | Guide |
 |---|---|---|
-| Online QR validation | `QR_API_*` | SETUP.md 4.6 |
+| Online QR validation / paid entry | `QR_API_*` (`QR_API_ORDER=api_only` for paid) | SETUP.md 4.6 |
 | Air sensors on a WiFi board | `SENSOR_URL` | SETUP.md 6.1 |
 | Odour alert limits | `ODOUR_*` | SETUP.md 6.4 |
 | MQ-135 / MQ-136 gas sensors | `MQ=1`, `MQ135_R0`, `MQ136_R0` | SETUP.md 6.3 |
@@ -322,6 +323,7 @@ facility status && facility doctor
 | `facility doctor` | Full installation check |
 | `facility doctor door` / `camera` / `odour` | Check one function only |
 | `facility feature` / `facility feature camera off` | Show the three functions, or switch one on/off (restarts, then checks it) |
+| `facility door` / `facility door delay male 8` | Show each door's unlock time, or set one (1–30 s; `all` for every door) |
 | `facility start` / `stop` / `restart` | Control the service |
 | `facility config` | Edit `.env`, then restart |
 | `facility test` | Run the test suite |

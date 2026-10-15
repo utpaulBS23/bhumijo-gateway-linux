@@ -92,6 +92,15 @@ def _qr_api_url(admin_url):
     return admin_url + (raw if raw.startswith("/") else "/" + raw)
 
 
+def _qr_api_order(admin_url):
+    """api_only (paid entry) needs the API: without it no QR could ever open."""
+    order = _choice("QR_API_ORDER", "local_first",
+                    ["local_first", "api_first", "api_only"]).lower()
+    if order == "api_only" and not _qr_api_url(admin_url) and enabled("doors"):
+        raise ConfigError("QR_API_ORDER=api_only needs QR_API_URL (the backend's charge API)")
+    return order
+
+
 def _qr_api_extra():
     raw = _env("QR_API_EXTRA", "")
     if not raw:
@@ -112,14 +121,21 @@ def _choice(name, default, allowed):
     return value
 
 
+# How long a QR / app unlock keeps the door open (seconds). The KC868 holds
+# the relay that long and releases it by itself (firmware MAX_HOLD = 30).
+UNLOCK_DEFAULT = 5.0
+UNLOCK_MIN, UNLOCK_MAX = 1.0, 30.0
+
+
 @dataclass(frozen=True)
 class DoorSpec:
     """One physical door: its relay channel, exit input, reed pin and scanners."""
     name: str                     # section, e.g. "male" / "female"
-    relay: int                    # KC868 channel 1-4 wired to this door's timer
+    relay: int                    # KC868 channel 1-4 that cuts this door's lock power
     exit_input: Optional[int]     # KC868 input index 0-3 (0 = Input01), None = no exit tap
     reed_gpio: Optional[int]      # Pi BCM pin for this door's MC-38, None = no reed
     scanner_ips: Tuple[str, ...]  # QR scanners whose scans open this door
+    unlock_seconds: float = UNLOCK_DEFAULT   # QR / app unlock time; the exit button uses its timer
 
 
 def _optional_int(name):
@@ -138,15 +154,17 @@ def _ips(name):
 
 
 def _parse_doors():
-    """DOORS=male,female + DOOR_<NAME>_{RELAY,EXIT_INPUT,REED_GPIO,SCANNER_IPS}.
+    """DOORS=male,female + DOOR_<NAME>_{RELAY,EXIT_INPUT,REED_GPIO,SCANNER_IPS,UNLOCK_SECONDS}.
 
     Without DOORS: a single door named "main" from DOOR_RELAY / EXIT_INPUT_INDEX /
     REED_GPIO / SCANNER_IPS (empty SCANNER_IPS = accept scans from any IP).
+    UNLOCK_SECONDS is the default unlock time for every door.
     """
+    unlock = _float("UNLOCK_SECONDS", UNLOCK_DEFAULT)
     names = _env("DOORS")
     if names is None:
         doors = (DoorSpec("main", _int("DOOR_RELAY", 1), _int("EXIT_INPUT_INDEX", 0),
-                          _int("REED_GPIO", 27), _ips("SCANNER_IPS")),)
+                          _int("REED_GPIO", 27), _ips("SCANNER_IPS"), unlock),)
     else:
         doors = []
         for name in [n.strip().lower() for n in names.split(",") if n.strip()]:
@@ -157,7 +175,8 @@ def _parse_doors():
             if relay is None:
                 raise ConfigError(f"{pre}RELAY is required")
             doors.append(DoorSpec(name, int(relay), _optional_int(pre + "EXIT_INPUT"),
-                                  _optional_int(pre + "REED_GPIO"), _ips(pre + "SCANNER_IPS")))
+                                  _optional_int(pre + "REED_GPIO"), _ips(pre + "SCANNER_IPS"),
+                                  _float(pre + "UNLOCK_SECONDS", unlock)))
         doors = tuple(doors)
     _validate_doors(doors)
     return doors
@@ -183,6 +202,9 @@ def _validate_doors(doors):
             raise ConfigError(f"door {d.name}: relay {d.relay} not in 1-4")
         if d.exit_input is not None and not 0 <= d.exit_input <= 3:
             raise ConfigError(f"door {d.name}: exit input {d.exit_input} not in 0-3")
+        if not UNLOCK_MIN <= d.unlock_seconds <= UNLOCK_MAX:
+            raise ConfigError(f"door {d.name}: unlock time {d.unlock_seconds:g} s not in "
+                              f"{UNLOCK_MIN:g}-{UNLOCK_MAX:g} s")
     if len(doors) > 1 and any(not d.scanner_ips for d in doors):
         raise ConfigError("with several doors, every door needs SCANNER_IPS")
 
@@ -216,7 +238,7 @@ class Settings:
     # Online QR validation (qr_api.py). qr_api_url "" = local cache only.
     qr_api_url: str
     qr_api_method: str
-    qr_api_order: str          # local_first | api_first
+    qr_api_order: str          # local_first | api_first | api_only (paid: online + balance)
     qr_api_timeout: float
     qr_api_auth: bool          # send the admin auth header
     qr_api_token_field: str
@@ -226,6 +248,9 @@ class Settings:
     qr_api_allow_field: str
     qr_api_allow_values: Tuple[str, ...]
     qr_api_deny_status: Tuple[int, ...]
+    qr_api_scan_id_field: str  # per-scan id (also Idempotency-Key): one charge per scan
+    qr_api_reason_field: str   # where the reply says why it refused, e.g. insufficient_balance
+    qr_dedup_seconds: float    # same code at the same door this soon = the same scan
 
     # Sensors on a WiFi board (firmware/air-sensor); "" = ENS160/AHT20 on the Pi's I2C
     sensor_url: str
@@ -309,8 +334,7 @@ class Settings:
             tokens_path=_env("TOKENS_PATH", "/facility/tokens"),
             qr_api_url=_qr_api_url(admin_url),
             qr_api_method=_choice("QR_API_METHOD", "POST", ["POST", "GET"]).upper(),
-            qr_api_order=_choice("QR_API_ORDER", "local_first",
-                                 ["local_first", "api_first"]).lower(),
+            qr_api_order=_qr_api_order(admin_url),
             qr_api_timeout=_float("QR_API_TIMEOUT", 3.0),
             qr_api_auth=_bool("QR_API_AUTH", True),
             qr_api_token_field=_env("QR_API_TOKEN_FIELD", "token"),
@@ -321,7 +345,10 @@ class Settings:
             qr_api_allow_values=tuple(v.strip().lower() for v in _env(
                 "QR_API_ALLOW_VALUES", DEFAULT_ALLOW_VALUES).split(",") if v.strip()),
             qr_api_deny_status=tuple(int(c) for c in _env(
-                "QR_API_DENY_STATUS", "400,403,404,410,422").split(",") if c.strip()),
+                "QR_API_DENY_STATUS", "400,402,403,404,410,422").split(",") if c.strip()),
+            qr_api_scan_id_field=os.environ.get("QR_API_SCAN_ID_FIELD", "scan_id").strip(),
+            qr_api_reason_field=_env("QR_API_REASON_FIELD", "reason"),
+            qr_dedup_seconds=_float("QR_DEDUP_SECONDS", 10),
             sensor_url=_env("SENSOR_URL", ""),
             sensor_timeout=_float("SENSOR_TIMEOUT", 3.0),
             cam_host=_env("CAM_HOST", ""),
