@@ -160,20 +160,34 @@ class DoorController:
         self._door_event("denied", source="qr", reason=reason, **extra)
         return "denied"
 
-    def facility_open(self, auth_code):
-        """Facility app, authenticated by the per-facility Auth Code."""
+    def facility_open(self, auth_code, use=None, purpose=None, amount=None, attendant=None):
+        """Facility app (attendant's button), authenticated by the per-facility Auth Code.
+
+        use = "customer" (a customer paid cash at the counter: logged as a cash
+        sale, amount optional) or "personal" (the attendant's own use, with a
+        purpose such as cleaning or bath). None = an older app that sends neither.
+        Never needs the internet: the backend gets the event from the queue.
+        """
         if not self.store.auth_code_valid(auth_code):
             log.info("[%s] Facility app denied", self.name)
             self._door_event("denied", source="facility_app")
             return "denied"
-        return self._open("attendant", "facility_app")
+        details = {k: v for k, v in (
+            ("use", use), ("purpose", purpose),
+            ("payment", "cash" if use == "customer" else None),
+            ("amount", amount), ("attendant", attendant)) if v is not None}
+        if use:
+            log.info("[%s] attendant open: %s%s", self.name, use,
+                     f" ({purpose})" if purpose else "")
+        return self._open("attendant", "facility_app", **details)
 
-    def _open(self, kind, source, scan_id=None):
+    def _open(self, kind, source, scan_id=None, **details):
         extra = {"scan_id": scan_id} if scan_id else {}
+        extra.update(details)
         if not self._fire():
-            if scan_id:
-                # The backend charged this scan but nobody got in: tell it, so
-                # it can refund (matched by scan_id)
+            if scan_id or details.get("payment"):
+                # Paid (online charge, or cash taken at the counter) but nobody
+                # got in: tell the backend, so it can refund / void the sale
                 self._door_event("relay_failed", source=source, **extra)
             return "relay_error"
         with self._lock:

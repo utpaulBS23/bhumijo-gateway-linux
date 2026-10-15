@@ -6,6 +6,7 @@ LAN only. Never expose port 5454 to the internet.
     GET|POST /qrscanner   ?cardid=..         same, legacy scanner format + response
     POST /rakindaqrscanner {SCode}           same, Rakinda format + response
     POST /facility/open   {authCode, door}   Facility app; door = section name
+                          + use: customer (cash, amount?) | personal (purpose), attendant?
     POST /door/opened     ?door=<name>       bench test only (DOOR_TEST_ENDPOINTS=1)
     POST /door/closed     ?door=<name>       bench test only (DOOR_TEST_ENDPOINTS=1)
     GET  /health                             liveness + queue size
@@ -23,7 +24,46 @@ from flask import Flask, g, jsonify, request
 log = logging.getLogger("app")
 
 STATUS = {"opened": 200, "denied": 403, "relay_error": 502,
-          "unknown_scanner": 403, "unknown_door": 400, "rate_limited": 429}
+          "unknown_scanner": 403, "unknown_door": 400, "rate_limited": 429,
+          "bad_request": 400}
+
+ATTENDANT_USES = ("customer", "personal")
+
+
+def attendant_fields(data, headers, purposes):
+    """The Facility app's use / purpose / amount / attendant -> (fields, error).
+
+    error is None, or why the request is refused (400): bad_use, bad_purpose,
+    bad_amount. An app that sends no `use` at all is accepted (older app).
+    """
+    def get(key, header):
+        v = headers.get(header) if headers.get(header) is not None else data.get(key)
+        return v.strip() if isinstance(v, str) else v
+
+    use, purpose = get("use", "X-Use"), get("purpose", "X-Purpose")
+    amount, attendant = data.get("amount"), get("attendant", "X-Attendant")
+    use = use.lower() if isinstance(use, str) and use else None
+    if use is None:
+        return {}, None
+    if use not in ATTENDANT_USES:
+        return None, "bad_use"
+    fields = {"use": use}
+    if use == "personal":
+        purpose = purpose.lower() if isinstance(purpose, str) else None
+        if purpose not in purposes:
+            return None, "bad_purpose"
+        fields["purpose"] = purpose
+    elif amount not in (None, ""):
+        try:
+            amount = round(float(amount), 2)
+        except (TypeError, ValueError):
+            return None, "bad_amount"
+        if amount < 0 or isinstance(data.get("amount"), bool):
+            return None, "bad_amount"
+        fields["amount"] = amount
+    if isinstance(attendant, (str, int)) and str(attendant).strip():
+        fields["attendant"] = str(attendant).strip()[:64]
+    return fields, None
 
 # Door endpoints, switched off with ENABLE_DOORS=0
 DOOR_ENDPOINTS = {"qr", "qrscanner", "rakinda", "facility_open", "door_opened", "door_closed"}
@@ -118,7 +158,7 @@ def create_app(settings, doors, store, uplink, camera=None, limiter=None, odour=
         return request.get_json(silent=True) or {}
 
     def reply(result, door=None):
-        extra = {}
+        extra = {"reason": g.bad_request} if "bad_request" in g else {}
         if "qr_why" in g:   # a scan: tell the scanner (and the person) why
             extra = dict(reason=g.qr_why, message=scanner_message(settings, result, g.qr_why))
         return (jsonify(ok=result == "opened", result=result,
@@ -128,7 +168,7 @@ def create_app(settings, doors, store, uplink, camera=None, limiter=None, odour=
         result, g.qr_why = door.qr_detail(token)
         return result
 
-    def attempt(door, fn_name, value):
+    def attempt(door, fn_name, value, **kw):
         """-> (result, door). Applies the failure limiter."""
         ip = request.remote_addr or "?"
         # Known scanners are exempt: a run of bad codes at the door must not
@@ -141,13 +181,13 @@ def create_app(settings, doors, store, uplink, camera=None, limiter=None, odour=
         if door is None:
             limiter.fail(ip)
             return ("unknown_scanner" if fn_name == "qr" else "unknown_door"), None
-        result = scan_qr(door, value) if fn_name == "qr" else getattr(door, fn_name)(value)
+        result = scan_qr(door, value) if fn_name == "qr" else getattr(door, fn_name)(value, **kw)
         if result == "denied":
             limiter.fail(ip)
         return result, door
 
-    def unlock(door, fn_name, value):
-        return reply(*attempt(door, fn_name, value))
+    def unlock(door, fn_name, value, **kw):
+        return reply(*attempt(door, fn_name, value, **kw))
 
     def scan():
         door = by_scanner.get(request.remote_addr) or any_scanner
@@ -188,7 +228,11 @@ def create_app(settings, doors, store, uplink, camera=None, limiter=None, odour=
         data = body()
         code = request.headers.get("X-Auth-Code") or data.get("authCode")
         door = named_door(request.headers.get("X-Door") or data.get("door"))
-        return unlock(door, "facility_open", code)
+        fields, error = attendant_fields(data, request.headers, settings.attendant_purposes)
+        if error:
+            g.bad_request = error
+            return reply("bad_request")
+        return unlock(door, "facility_open", code, **fields)
 
     if settings.door_test_endpoints:
         @app.post("/door/opened")

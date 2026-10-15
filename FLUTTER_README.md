@@ -5,7 +5,7 @@
 >
 > | Endpoint | Body | Result |
 > |---|---|---|
-> | `POST /facility/open` | `{"authCode": "...", "door": "male" \| "female"}` | 200 opened · 403 wrong code · 400 unknown door · 429 too many tries · 502 relay error |
+> | `POST /facility/open` | `{"authCode": "...", "door": "male" \| "female", "use": "customer" \| "personal", "purpose"?: "cleaning" \| "bath" \| "toilet" \| "maintenance", "amount"?: 20, "attendant"?: "..."}` | 200 opened · 403 wrong code · 400 unknown door or bad use/purpose/amount (`reason`) · 429 too many tries · 502 relay error |
 > | `GET /health` | — | `doors.<name>.open`, queue, last sync |
 >
 > - **No lock action:** each door relocks by itself through its timer module.
@@ -178,7 +178,8 @@ context.read<ManagerBloc>().add(const StatusRefreshRequested('male'));
 ```
 POST /facility/open
   └─ Unlock one door (relocks automatically)
-  └─ Payload: {"authCode": "<facility auth code>", "door": "male" | "female"}
+  └─ Payload: {"authCode": "<facility auth code>", "door": "male" | "female",
+               "use": "customer" (cash, "amount"?) | "personal" ("purpose": cleaning | bath | toilet | maintenance)}
   └─ 200 opened · 403 wrong code · 400 unknown door · 429 too many tries
 
 GET /health

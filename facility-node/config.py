@@ -262,6 +262,7 @@ class Settings:
     qr_api_reason_field: str   # where the reply says why it refused, e.g. insufficient_balance
     qr_dedup_seconds: float    # same code at the same door this soon = the same scan
     scanner_messages: dict     # what the scanner shows: opened / no_balance / offline / denied / error
+    attendant_purposes: Tuple[str, ...]   # what "personal use" may be for (Facility app)
 
     # Sensors on a WiFi board (firmware/air-sensor); "" = ENS160/AHT20 on the Pi's I2C
     sensor_url: str
@@ -362,6 +363,8 @@ class Settings:
             qr_dedup_seconds=_float("QR_DEDUP_SECONDS", 10),
             scanner_messages={k: os.environ.get("SCANNER_MSG_" + k.upper(), v).strip() or v
                               for k, v in SCANNER_MESSAGES.items()},
+            attendant_purposes=tuple(p.strip().lower() for p in _env(
+                "ATTENDANT_PURPOSES", "cleaning,bath,toilet,maintenance").split(",") if p.strip()),
             sensor_url=_env("SENSOR_URL", ""),
             sensor_timeout=_float("SENSOR_TIMEOUT", 3.0),
             cam_host=_env("CAM_HOST", ""),

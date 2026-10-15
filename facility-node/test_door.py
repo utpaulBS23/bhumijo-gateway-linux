@@ -1550,6 +1550,68 @@ class UnlockTimeTests(unittest.TestCase):
         self.assertEqual(h["doors"]["male"]["unlock_s"], 5.0)
 
 
+class AttendantUseTests(unittest.TestCase):
+    """Facility app button: customer use (cash) or personal use (with a purpose)."""
+
+    def setUp(self):
+        doors, self.relay, self.up, _, store = make_doors(TWO_DOORS)
+        s = doors[0].s
+        self.c = create_app(s, doors, store, Uplink(s, store, session=FakeSession())).test_client()
+
+    def open(self, **body):
+        return self.c.post("/facility/open", json={"authCode": "auth-code-123", "door": "male", **body})
+
+    def test_customer_cash(self):
+        r = self.open(use="customer", amount="20", attendant="Rahim")
+        self.assertEqual(r.status_code, 200)
+        ev = self.up.of("door_event")[0]
+        self.assertEqual({k: ev[k] for k in ("type", "use", "payment", "amount", "attendant")},
+                         {"type": "attendant", "use": "customer", "payment": "cash",
+                          "amount": 20.0, "attendant": "Rahim"})
+        self.assertNotIn("purpose", ev)
+
+    def test_personal_with_purpose(self):
+        for purpose in ("cleaning", "Bath", "toilet", "maintenance"):
+            self.assertEqual(self.open(use="personal", purpose=purpose).status_code, 200, purpose)
+        evs = self.up.of("door_event")
+        self.assertEqual([e["purpose"] for e in evs], ["cleaning", "bath", "toilet", "maintenance"])
+        self.assertTrue(all(e["use"] == "personal" and "payment" not in e for e in evs))
+
+    def test_bad_requests_open_nothing(self):
+        for body, why in (({"use": "friend"}, "bad_use"),
+                          ({"use": "personal"}, "bad_purpose"),
+                          ({"use": "personal", "purpose": "party"}, "bad_purpose"),
+                          ({"use": "customer", "amount": "ten"}, "bad_amount"),
+                          ({"use": "customer", "amount": -5}, "bad_amount")):
+            r = self.open(**body)
+            self.assertEqual((r.status_code, r.json["reason"]), (400, why), body)
+        self.assertEqual((self.relay.fired, self.up.of("door_event")), ([], []))
+
+    def test_headers_and_older_app(self):
+        r = self.c.post("/facility/open", headers={"X-Auth-Code": "auth-code-123", "X-Door": "female",
+                                                    "X-Use": "personal", "X-Purpose": "cleaning"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(self.open().status_code, 200, "an app that sends no use still opens")
+        a, b = self.up.of("door_event")
+        self.assertEqual((a["section"], a["purpose"], "use" in b), ("female", "cleaning", False))
+
+    def test_wrong_code_still_denied(self):
+        r = self.c.post("/facility/open", json={"authCode": "nope", "door": "male",
+                                                 "use": "personal", "purpose": "bath"})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(self.relay.fired, [])
+
+    def test_cash_sale_with_relay_failure_is_voided(self):
+        self.relay.fail = True
+        self.assertEqual(self.open(use="customer", amount=20).status_code, 502)
+        ev = self.up.of("door_event")[0]
+        self.assertEqual((ev["type"], ev["payment"], ev["amount"]), ("relay_failed", "cash", 20.0))
+
+    def test_purposes_configurable(self):
+        s = settings({"ATTENDANT_PURPOSES": "cleaning, Refill"})
+        self.assertEqual(s.attendant_purposes, ("cleaning", "refill"))
+
+
 class MiscTests(unittest.TestCase):
     def test_required_config(self):
         old = dict(os.environ)

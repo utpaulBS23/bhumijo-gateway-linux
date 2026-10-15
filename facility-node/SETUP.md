@@ -450,14 +450,26 @@ In the app's settings:
 | Port | `5454` |
 | Auth Code | the facility's Auth Code (from the admin backend), **not** the Facility ID |
 
-The app unlocks with:
+The app's button has two choices, and sends one of these:
 
 ```http
 POST /facility/open
 Content-Type: application/json
 
-{"authCode": "<auth code>", "door": "male"}     // or "female"
+{"authCode": "<auth code>", "door": "male", "use": "customer", "amount": 20}
+{"authCode": "<auth code>", "door": "female", "use": "personal", "purpose": "cleaning"}
 ```
+
+| Field | Values | Meaning |
+|---|---|---|
+| `door` | `male` / `female` | Which door opens |
+| `use` | `customer` | A customer paid **cash** at the counter: logged as a cash sale |
+| | `personal` | The attendant's own use: needs `purpose` |
+| `purpose` | `cleaning`, `bath`, `toilet`, `maintenance` | Personal use only; the list is `ATTENDANT_PURPOSES` in `.env` |
+| `amount` | number, optional | Customer use: the cash taken, for the backend's sales total |
+| `attendant` | text, optional | Who pressed it (name or ID), for the log |
+
+It works **offline**: the door opens on the Auth Code alone and the event reaches the backend later. A wrong `use`, a missing or unknown `purpose`, or a bad `amount` gets `400` with `reason` (`bad_use`, `bad_purpose`, `bad_amount`) and opens nothing. An older app that sends no `use` still opens and is logged as before.
 
 Five wrong Auth Codes in 60s from one phone block that phone for a minute.
 
@@ -472,6 +484,7 @@ Run every test for **both doors**. Tick each column.
 | D3 | Show a valid QR (section 4.5) | This door opens for its unlock time (time it); `entry` logged with `section` | ☐ | ☐ |
 | D4 | Show an invalid QR | Stays locked; `denied` logged | ☐ | ☐ |
 | D5 | Facility app open with `door` set | Only that door opens; `attendant` logged | ☐ | ☐ |
+| D5a | App: customer use (cash), then personal use for cleaning | Both open; logged with `use: customer, payment: cash` and `use: personal, purpose: cleaning` | ☐ | ☐ |
 | D5b | *Paid entry:* scan a code with balance, then one without | Opens once, balance goes down by one; the second is refused with `insufficient_balance`, scanner shows "Insufficient balance…" | ☐ | ☐ |
 | D5c | *Paid entry:* unplug the router WAN, scan a paid code | Refused (`reason: offline`), scanner shows "No internet…"; a staff code and the app still open | ☐ | ☐ |
 | D6 | Press exit button | Door opens for the timer's delay (hardware); `exit` logged once | ☐ | ☐ |

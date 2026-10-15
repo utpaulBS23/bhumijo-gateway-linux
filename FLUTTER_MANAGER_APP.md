@@ -5,7 +5,7 @@
 >
 > | Endpoint | Body | Result |
 > |---|---|---|
-> | `POST /facility/open` | `{"authCode": "...", "door": "male" \| "female"}` | 200 opened · 403 wrong code · 400 unknown door · 429 too many tries · 502 relay error |
+> | `POST /facility/open` | `{"authCode": "...", "door": "male" \| "female", "use": "customer" \| "personal", "purpose"?: "cleaning" \| "bath" \| "toilet" \| "maintenance", "amount"?: 20, "attendant"?: "..."}` | 200 opened · 403 wrong code · 400 unknown door or bad use/purpose/amount (`reason`) · 429 too many tries · 502 relay error |
 > | `GET /health` | — | `doors.<name>.open`, queue, last sync |
 >
 > - **No lock action:** each door relocks by itself through its timer module.
@@ -319,7 +319,11 @@ class UserAccess extends Equatable {
 import 'package:dio/dio.dart';
 import '../models/relay_model.dart';
 
-enum UnlockResult { opened, wrongAuthCode, unknownDoor, tooManyAttempts, relayError }
+enum UnlockResult { opened, wrongAuthCode, unknownDoor, badRequest, tooManyAttempts, relayError }
+
+/// The button's two choices. Personal use needs a purpose.
+enum DoorUse { customer, personal }
+enum Purpose { cleaning, bath, toilet, maintenance }
 
 class GatewayService {
   late Dio _dio;
@@ -342,16 +346,28 @@ class GatewayService {
   }
 
   /// Unlock one door ("male" / "female"). The door relocks by itself.
-  Future<UnlockResult> unlockDoor(String door) async {
+  /// Customer use = cash at the counter (amount optional);
+  /// personal use = the attendant's own, with a purpose.
+  Future<UnlockResult> unlockDoor(String door,
+      {required DoorUse use, Purpose? purpose, num? amount, String? attendant}) async {
     try {
       final response = await _dio.post(
         '/facility/open',
-        data: {'authCode': authCode, 'door': door},
+        data: {
+          'authCode': authCode,
+          'door': door,
+          'use': use.name,
+          if (use == DoorUse.personal) 'purpose': purpose!.name,
+          if (use == DoorUse.customer && amount != null) 'amount': amount,
+          if (attendant != null) 'attendant': attendant,
+        },
       );
       switch (response.statusCode) {
         case 200: return UnlockResult.opened;
         case 403: return UnlockResult.wrongAuthCode;
-        case 400: return UnlockResult.unknownDoor;
+        case 400:   // reason: unknown_door | bad_use | bad_purpose | bad_amount
+          return response.data['result'] == 'unknown_door'
+              ? UnlockResult.unknownDoor : UnlockResult.badRequest;
         case 429: return UnlockResult.tooManyAttempts;
         default:  return UnlockResult.relayError;
       }
@@ -476,7 +492,10 @@ class ManagerBloc extends Bloc<ManagerEvent, ManagerState> {
   ) async {
     emit(const ManagerLoading());
     try {
-      final result = await repository.unlock(event.door);
+      // event.use / event.purpose come from the button's two choices:
+      // "Customer (cash)" or "Personal" -> cleaning / bath / toilet / maintenance
+      final result = await repository.unlock(event.door,
+          use: event.use, purpose: event.purpose, amount: event.amount);
       switch (result) {
         case UnlockResult.opened:
           currentLockState = currentLockState.copyWith(
@@ -490,6 +509,8 @@ class ManagerBloc extends Bloc<ManagerEvent, ManagerState> {
           emit(const ManagerError('Too many attempts - wait a minute'));
         case UnlockResult.unknownDoor:
           emit(const ManagerError('Unknown door'));
+        case UnlockResult.badRequest:
+          emit(const ManagerError('Choose customer or personal use (and a purpose)'));
         case UnlockResult.relayError:
           emit(const ManagerError('Door controller offline'));
       }
@@ -792,7 +813,7 @@ Timer.periodic(Duration(seconds: 5), (_) {
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/facility/open` | POST | Unlock a door: `{authCode, door}` |
+| `/facility/open` | POST | Unlock a door: `{authCode, door, use, purpose?, amount?, attendant?}` (customer = cash, personal = with purpose) |
 | `/health` | GET | Node health + per-door open state |
 
 ## Error Handling

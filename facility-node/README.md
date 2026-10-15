@@ -230,6 +230,7 @@ All settings live in `/opt/facility-node/.env`, loaded by systemd. **`.env.examp
 | 1 Door | Unlock time | `UNLOCK_SECONDS` (all doors), `DOOR_<NAME>_UNLOCK_SECONDS` | 1–30 s, default 5; `facility door delay male 8` |
 | 1 Door | Reed | `REED`, `REED_ACTIVE_HIGH`, `PROPPED_THRESHOLD`, `PROPPED_REPEAT`, `CLASSIFY_WINDOW` | |
 | 1 Door | QR validation | `QR_API_URL`, `_METHOD`, `_ORDER`, `_TIMEOUT`, `_AUTH`, `_TOKEN_FIELD`, `_FACILITY_FIELD`, `_DOOR_FIELD`, `_EXTRA`, `_ALLOW_FIELD`, `_ALLOW_VALUES`, `_DENY_STATUS`, `_SCAN_ID_FIELD`, `_REASON_FIELD`, `QR_DEDUP_SECONDS` | off when `QR_API_URL` is empty; `QR_API_ORDER=api_only` = paid entry |
+| 1 Door | Attendant purposes | `ATTENDANT_PURPOSES` | what personal use may be for; default `cleaning,bath,toilet,maintenance` |
 | 1 Door | Scanner messages | `SCANNER_MSG_OPENED`, `_NO_BALANCE`, `_OFFLINE`, `_DENIED`, `_ERROR` | what the scanner shows; English defaults |
 | 1 Door | Bench test | `DOOR_TEST_ENDPOINTS` | keep `0` in production |
 | 2 Camera | Camera | `CAM_HOST`, `CAM_PORT`, `CAM_RTSP`, `CAM_PROBE_INTERVAL`, `CAM_FRAME_INTERVAL` | set with `facility camera` |
@@ -254,6 +255,8 @@ Port 5454, **facility LAN only**: the firewall blocks everything else, and there
 | `POST /facility/open` | Facility app | `{authCode, door}` or headers `X-Auth-Code` + `X-Door` | `200` · `403` · `400 unknown_door` · `429` · `502` |
 | `GET /health` | Ops | — | queue, tokens, last pull/flush, doors, camera, odour, qr_api |
 | `POST /door/opened?door=…` / `/door/closed?door=…` | Bench tests | — | only if `DOOR_TEST_ENDPOINTS=1` |
+
+`POST /facility/open` also takes `use` = `customer` (cash at the counter, optional `amount`) or `personal` (with `purpose`, one of `ATTENDANT_PURPOSES`), and an optional `attendant` (also as headers `X-Use`, `X-Purpose`, `X-Attendant`). A bad value → `400` with `reason` `bad_use` / `bad_purpose` / `bad_amount`; no `use` = an older app, accepted.
 
 Scan replies also say why, for scanners with a display: `/qr` adds `reason` and `message`, `/qrscanner` adds `message`, and the Rakinda reply's `Msg` is the message. The message comes from the reason: opened, `insufficient_balance` (also `insufficient_funds`, `no_balance`, `low_balance`) → no balance, `offline` → no internet, `relay_error` → door error, anything else → access denied. Each text is set with `SCANNER_MSG_*`.
 
@@ -290,10 +293,10 @@ Values are `null` when a sensor is warming up, failed, or not fitted. `tvoc_scor
 | `type` | Extra fields |
 |---|---|
 | `entry` | `source`: `qr` \| `qr_api` \| `qr_local`; `scan_id` when the API approved it |
-| `attendant` | `source`: `facility_app` |
+| `attendant` | `source`: `facility_app`; `use`: `customer` (+ `payment: "cash"`, `amount`?) or `personal` (+ `purpose`: `cleaning` \| `bath` \| `toilet` \| `maintenance`); `attendant`? (who pressed it) |
 | `exit` | `source`: `exit_button` |
 | `denied` | `source`: `qr` \| `facility_app`; `reason` (QR only: `unknown`, `api_denied`, `offline`, `empty`); `api_reason` and `scan_id` when the API refused |
-| `relay_failed` | `source`, `scan_id`: the API approved (charged) this scan but the relay failed: **refund it** |
+| `relay_failed` | `source`, and `scan_id` (a charged QR scan) or the cash-sale fields (`use: customer`, `payment`, `amount`): it was paid but the relay failed: **refund / void it** |
 | `door_closed` | `duration_s` |
 
 ### Push alert: `POST ALERT_PATH` (per anomaly)
@@ -406,7 +409,7 @@ Runs on any machine with Python 3.9+. No Pi or hardware is needed for the tests.
 ```bash
 cd facility-node
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python test_door.py            # 146 tests
+.venv/bin/python test_door.py            # 153 tests
 ```
 
 The test suite fakes the relay, the backend and the clock. It covers:
