@@ -18,7 +18,7 @@ import threading
 import time
 from collections import defaultdict, deque
 
-from flask import Flask, jsonify, request
+from flask import Flask, g, jsonify, request
 
 log = logging.getLogger("app")
 
@@ -27,6 +27,24 @@ STATUS = {"opened": 200, "denied": 403, "relay_error": 502,
 
 # Door endpoints, switched off with ENABLE_DOORS=0
 DOOR_ENDPOINTS = {"qr", "qrscanner", "rakinda", "facility_open", "door_opened", "door_closed"}
+
+# Backend refusal reasons that mean "top up your balance"
+NO_BALANCE = {"insufficient_balance", "insufficient_funds", "no_balance", "low_balance"}
+
+
+def scanner_message(settings, result, why):
+    """What the scanner should show the person, from the scan's result and reason."""
+    msgs = settings.scanner_messages
+    if result == "opened":
+        return msgs["opened"]
+    if result == "relay_error":
+        return msgs["error"]
+    if why in NO_BALANCE:
+        return msgs["no_balance"]
+    if why == "offline":
+        return msgs["offline"]
+    return msgs["denied"]
+
 
 # Field names scanners use for the scanned text, in priority order
 TOKEN_FIELDS = ("token", "SCode", "scode", "cardid", "code", "qr", "data")
@@ -100,8 +118,15 @@ def create_app(settings, doors, store, uplink, camera=None, limiter=None, odour=
         return request.get_json(silent=True) or {}
 
     def reply(result, door=None):
+        extra = {}
+        if "qr_why" in g:   # a scan: tell the scanner (and the person) why
+            extra = dict(reason=g.qr_why, message=scanner_message(settings, result, g.qr_why))
         return (jsonify(ok=result == "opened", result=result,
-                        door=door.name if door else None), STATUS[result])
+                        door=door.name if door else None, **extra), STATUS[result])
+
+    def scan_qr(door, token):
+        result, g.qr_why = door.qr_detail(token)
+        return result
 
     def attempt(door, fn_name, value):
         """-> (result, door). Applies the failure limiter."""
@@ -110,13 +135,13 @@ def create_app(settings, doors, store, uplink, camera=None, limiter=None, odour=
         # lock the scanner out for everyone. Tokens can't be brute-forced by
         # holding codes up to a camera anyway.
         if fn_name == "qr" and ip in by_scanner:
-            return door.qr(value), door
+            return scan_qr(door, value), door
         if limiter.blocked(ip):
             return "rate_limited", None
         if door is None:
             limiter.fail(ip)
             return ("unknown_scanner" if fn_name == "qr" else "unknown_door"), None
-        result = getattr(door, fn_name)(value)
+        result = scan_qr(door, value) if fn_name == "qr" else getattr(door, fn_name)(value)
         if result == "denied":
             limiter.fail(ip)
         return result, door
@@ -147,14 +172,16 @@ def create_app(settings, doors, store, uplink, camera=None, limiter=None, odour=
         ok = result == "opened"
         params = request.args.to_dict() or (request.get_json(silent=True) or {})
         return jsonify(status="success" if ok else "denied", data=[params],
-                       access_granted=ok, door=door.name if door else None), 200
+                       access_granted=ok, door=door.name if door else None,
+                       message=scanner_message(settings, result, g.get("qr_why"))), 200
 
     @app.post("/rakindaqrscanner")
     def rakinda():
         result, _ = scan()
+        msg = scanner_message(settings, result, g.get("qr_why"))
         if result == "opened":
-            return jsonify(ResultCode="1", Msg="Please Enter the facility", Audio="40"), 200
-        return jsonify(ResultCode="0", Msg="Access denied", Audio="0"), 200
+            return jsonify(ResultCode="1", Msg=msg, Audio="40"), 200
+        return jsonify(ResultCode="0", Msg=msg, Audio="0"), 200
 
     @app.post("/facility/open")
     def facility_open():

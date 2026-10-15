@@ -316,6 +316,18 @@ If the scanner's firmware has a fixed path, point it at the matching compatible 
 
 All three routes run the same checks. The door is chosen by the scanner's IP.
 
+**What the scanner shows.** Scanners with a display (Rakinda: `Msg`) show why a scan was refused:
+
+| Situation | Default message | `.env` |
+|---|---|---|
+| Opened | Please Enter the facility | `SCANNER_MSG_OPENED` |
+| No balance (paid entry) | Insufficient balance, please top up | `SCANNER_MSG_NO_BALANCE` |
+| No internet (paid entry) | No internet, please try again | `SCANNER_MSG_OFFLINE` |
+| Any other refusal | Access denied | `SCANNER_MSG_DENIED` |
+| Relay failed | Door error, please call the attendant | `SCANNER_MSG_ERROR` |
+
+Change the texts in `.env` (e.g. to Bangla). Keep them short, and use plain Latin letters if the scanner shows boxes instead of other scripts.
+
 ✅ **Check:** scan any QR and watch `journalctl -u facility-node -f`:
 
 | Log shows | Meaning |
@@ -460,8 +472,8 @@ Run every test for **both doors**. Tick each column.
 | D3 | Show a valid QR (section 4.5) | This door opens for its unlock time (time it); `entry` logged with `section` | ☐ | ☐ |
 | D4 | Show an invalid QR | Stays locked; `denied` logged | ☐ | ☐ |
 | D5 | Facility app open with `door` set | Only that door opens; `attendant` logged | ☐ | ☐ |
-| D5b | *Paid entry:* scan a code with balance, then one without | Opens once, balance goes down by one; the second is refused with `insufficient_balance` | ☐ | ☐ |
-| D5c | *Paid entry:* unplug the router WAN, scan a paid code | Refused (`reason: offline`); a staff code and the app still open | ☐ | ☐ |
+| D5b | *Paid entry:* scan a code with balance, then one without | Opens once, balance goes down by one; the second is refused with `insufficient_balance`, scanner shows "Insufficient balance…" | ☐ | ☐ |
+| D5c | *Paid entry:* unplug the router WAN, scan a paid code | Refused (`reason: offline`), scanner shows "No internet…"; a staff code and the app still open | ☐ | ☐ |
 | D6 | Press exit button | Door opens for the timer's delay (hardware); `exit` logged once | ☐ | ☐ |
 | D6b | `facility door delay <door> 10`, then D3 again | Opens for 10 s; set it back afterwards | ☐ | ☐ |
 | D7 | Open the door by hand, no trigger (reed fitted) | `forced_open` alert (+ snapshot if the camera is on) | ☐ | ☐ |

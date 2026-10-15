@@ -1247,6 +1247,24 @@ class PaidEntryTests(unittest.TestCase):
         ev = up.of("door_event")[0]
         self.assertEqual((ev["type"], ev["scan_id"]), ("relay_failed", sess.calls[0][2]["scan_id"]))
 
+    def test_scanner_shows_why(self):
+        replies = [FakeResp(200, {"allowed": True}),
+                   FakeResp(402, {"allowed": False, "reason": "insufficient_balance"}),
+                   "down", FakeResp(200, {"allowed": False, "reason": "expired"})]
+        d, _, _, _, _ = self.door(replies, SCANNER_MSG_OFFLINE="Internet nei, abar chesta korun")
+        store = d.store
+        c = create_app(d.s, [d], store, Uplink(d.s, store, session=FakeSession())).test_client()
+        msgs = [c.post("/rakindaqrscanner", json={"SCode": t}).json["Msg"]
+                for t in ("rich", "poor", "cached", "old")]
+        self.assertEqual(msgs, ["Please Enter the facility", "Insufficient balance, please top up",
+                                "Internet nei, abar chesta korun", "Access denied"])
+        r = c.post("/qr", json={"token": "poor"})   # repeat within 10 s: same answer, no API call
+        self.assertEqual((r.status_code, r.json["reason"], r.json["message"]),
+                         (403, "insufficient_balance", "Insufficient balance, please top up"))
+        r = c.get("/qrscanner?cardid=fn-staff-code-0001")
+        self.assertEqual((r.json["access_granted"], r.json["message"]),
+                         (True, "Please Enter the facility"))
+
     def test_api_only_needs_the_api(self):
         with self.assertRaises(ConfigError):
             settings({"QR_API_ORDER": "api_only"})

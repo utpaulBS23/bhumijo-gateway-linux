@@ -68,6 +68,16 @@ def _optional_float(name):
 
 DEFAULT_ALLOW_VALUES = "true,1,yes,granted,allow,allowed,success,ok"
 
+# What a scanner with a display shows after a scan (SCANNER_MSG_<KEY> in .env).
+# Keep them short: scanner screens are small, and some show only ASCII.
+SCANNER_MESSAGES = {
+    "opened": "Please Enter the facility",
+    "no_balance": "Insufficient balance, please top up",
+    "offline": "No internet, please try again",
+    "denied": "Access denied",
+    "error": "Door error, please call the attendant",
+}
+
 # The node's three functions, each switched on or off in .env (all on by
 # default). Settings listed here are only required while their function is on.
 FEATURES = {
@@ -251,6 +261,7 @@ class Settings:
     qr_api_scan_id_field: str  # per-scan id (also Idempotency-Key): one charge per scan
     qr_api_reason_field: str   # where the reply says why it refused, e.g. insufficient_balance
     qr_dedup_seconds: float    # same code at the same door this soon = the same scan
+    scanner_messages: dict     # what the scanner shows: opened / no_balance / offline / denied / error
 
     # Sensors on a WiFi board (firmware/air-sensor); "" = ENS160/AHT20 on the Pi's I2C
     sensor_url: str
@@ -349,6 +360,8 @@ class Settings:
             qr_api_scan_id_field=os.environ.get("QR_API_SCAN_ID_FIELD", "scan_id").strip(),
             qr_api_reason_field=_env("QR_API_REASON_FIELD", "reason"),
             qr_dedup_seconds=_float("QR_DEDUP_SECONDS", 10),
+            scanner_messages={k: os.environ.get("SCANNER_MSG_" + k.upper(), v).strip() or v
+                              for k, v in SCANNER_MESSAGES.items()},
             sensor_url=_env("SENSOR_URL", ""),
             sensor_timeout=_float("SENSOR_TIMEOUT", 3.0),
             cam_host=_env("CAM_HOST", ""),

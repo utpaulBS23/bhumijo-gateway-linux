@@ -230,6 +230,7 @@ All settings live in `/opt/facility-node/.env`, loaded by systemd. **`.env.examp
 | 1 Door | Unlock time | `UNLOCK_SECONDS` (all doors), `DOOR_<NAME>_UNLOCK_SECONDS` | 1–30 s, default 5; `facility door delay male 8` |
 | 1 Door | Reed | `REED`, `REED_ACTIVE_HIGH`, `PROPPED_THRESHOLD`, `PROPPED_REPEAT`, `CLASSIFY_WINDOW` | |
 | 1 Door | QR validation | `QR_API_URL`, `_METHOD`, `_ORDER`, `_TIMEOUT`, `_AUTH`, `_TOKEN_FIELD`, `_FACILITY_FIELD`, `_DOOR_FIELD`, `_EXTRA`, `_ALLOW_FIELD`, `_ALLOW_VALUES`, `_DENY_STATUS`, `_SCAN_ID_FIELD`, `_REASON_FIELD`, `QR_DEDUP_SECONDS` | off when `QR_API_URL` is empty; `QR_API_ORDER=api_only` = paid entry |
+| 1 Door | Scanner messages | `SCANNER_MSG_OPENED`, `_NO_BALANCE`, `_OFFLINE`, `_DENIED`, `_ERROR` | what the scanner shows; English defaults |
 | 1 Door | Bench test | `DOOR_TEST_ENDPOINTS` | keep `0` in production |
 | 2 Camera | Camera | `CAM_HOST`, `CAM_PORT`, `CAM_RTSP`, `CAM_PROBE_INTERVAL`, `CAM_FRAME_INTERVAL` | set with `facility camera` |
 | 2 Camera | Snapshots | `SNAPSHOT_DIR`, `SNAPSHOT_UPLOAD_PATH`, `SNAPSHOT_KEEP_DAYS` | upload off when the path is empty |
@@ -253,6 +254,8 @@ Port 5454, **facility LAN only**: the firewall blocks everything else, and there
 | `POST /facility/open` | Facility app | `{authCode, door}` or headers `X-Auth-Code` + `X-Door` | `200` · `403` · `400 unknown_door` · `429` · `502` |
 | `GET /health` | Ops | — | queue, tokens, last pull/flush, doors, camera, odour, qr_api |
 | `POST /door/opened?door=…` / `/door/closed?door=…` | Bench tests | — | only if `DOOR_TEST_ENDPOINTS=1` |
+
+Scan replies also say why, for scanners with a display: `/qr` adds `reason` and `message`, `/qrscanner` adds `message`, and the Rakinda reply's `Msg` is the message. The message comes from the reason: opened, `insufficient_balance` (also `insufficient_funds`, `no_balance`, `low_balance`) → no balance, `offline` → no internet, `relay_error` → door error, anything else → access denied. Each text is set with `SCANNER_MSG_*`.
 
 With `ENABLE_DOORS=0` every door endpoint answers `404 {"result": "doors_off"}`. `/health` always answers and includes `features: {doors, camera, odour}`; a function that is off shows `null` (camera, odour) or `{}` (doors).
 
@@ -403,7 +406,7 @@ Runs on any machine with Python 3.9+. No Pi or hardware is needed for the tests.
 ```bash
 cd facility-node
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python test_door.py            # 145 tests
+.venv/bin/python test_door.py            # 146 tests
 ```
 
 The test suite fakes the relay, the backend and the clock. It covers:

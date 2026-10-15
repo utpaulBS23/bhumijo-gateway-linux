@@ -40,7 +40,7 @@ class DoorController:
         self._opened_at = None      # ts door physically opened (reed), else None
         self._propped_alerts = 0    # propped_open alerts sent for current opening
         self._exit_held = False
-        self._recent_scans = {}     # token -> (ts, result): scanner repeats, not new scans
+        self._recent_scans = {}     # token -> (ts, result, why): scanner repeats, not new scans
 
     # ---- events -----------------------------------------------------------
 
@@ -87,22 +87,28 @@ class DoorController:
         QR_DEDUP_SECONDS is the same scan: no second API call (no second
         charge) and no second event; an open door just stays open longer.
         """
+        return self.qr_detail(token)[0]
+
+    def qr_detail(self, token):
+        """-> (result, why). why says what the scanner should tell the person:
+        None (opened), "empty", "unknown", "offline", "relay_error", or the
+        backend's refusal reason (e.g. "insufficient_balance", else "api_denied")."""
         if not token:
-            return self._deny_qr("empty")
+            return self._deny_qr("empty"), "empty"
         if self.qr_api is not None and self.s.qr_dedup_seconds > 0:
             repeat = self._repeat_scan(token)
             if repeat is not None:
                 return repeat
-        result = self._qr(token)
+        result, why = self._qr(token)
         if self.qr_api is not None:
             with self._lock:
-                self._recent_scans[token] = (self.clock(), result)
-        return result
+                self._recent_scans[token] = (self.clock(), result, why)
+        return result, why
 
     def _repeat_scan(self, token):
         now = self.clock()
         with self._lock:
-            for t, (ts, _) in list(self._recent_scans.items()):
+            for t, (ts, *_) in list(self._recent_scans.items()):
                 if now - ts > self.s.qr_dedup_seconds:
                     del self._recent_scans[t]
             seen = self._recent_scans.get(token)
@@ -111,33 +117,41 @@ class DoorController:
         if seen[1] == "opened":
             log.info("[%s] same QR again within %gs: keeping the door open, no new charge",
                      self.name, self.s.qr_dedup_seconds)
-            return "opened" if self._fire() else "relay_error"
-        return seen[1]
+            return ("opened", None) if self._fire() else ("relay_error", "relay_error")
+        return seen[1], seen[2]
 
     def _qr(self, token):
+        """-> (result, why), see qr_detail."""
         kind = self.store.token_kind(token, self.clock())
         if kind == "local":
             # The Pi issued it; the backend doesn't know it
-            return self._open("entry", "qr_local")
+            return self._opened(self._open("entry", "qr_local"))
         if self.qr_api is None:
-            return self._open("entry", "qr") if kind else self._deny_qr("unknown")
+            if kind:
+                return self._opened(self._open("entry", "qr"))
+            return self._deny_qr("unknown"), "unknown"
 
         order = self.s.qr_api_order
         if order == "local_first" and kind == "backend":
-            return self._open("entry", "qr")
+            return self._opened(self._open("entry", "qr"))
         scan_id = str(uuid.uuid4())
         verdict, why = self.qr_api.check_detail(token, self.name, scan_id)
         if verdict == "allow":
-            return self._open("entry", "qr_api", scan_id=scan_id)
+            return self._opened(self._open("entry", "qr_api", scan_id=scan_id))
         if verdict == "deny":
-            return self._deny_qr("api_denied", scan_id=scan_id, api_reason=why)
+            return (self._deny_qr("api_denied", scan_id=scan_id, api_reason=why),
+                    why or "api_denied")
         # unavailable
         if order == "api_only":
             # Paid entry: no internet = no check of the balance = no entry
-            return self._deny_qr("offline", scan_id=scan_id)
+            return self._deny_qr("offline", scan_id=scan_id), "offline"
         if order == "api_first" and kind:
-            return self._open("entry", "qr")
-        return self._deny_qr("unknown")
+            return self._opened(self._open("entry", "qr"))
+        return self._deny_qr("unknown"), "unknown"
+
+    @staticmethod
+    def _opened(result):
+        return result, (None if result == "opened" else result)
 
     def _deny_qr(self, reason, **extra):
         extra = {k: v for k, v in extra.items() if v is not None}
