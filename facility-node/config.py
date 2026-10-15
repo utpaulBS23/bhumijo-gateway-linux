@@ -68,6 +68,19 @@ def _optional_float(name):
 
 DEFAULT_ALLOW_VALUES = "true,1,yes,granted,allow,allowed,success,ok"
 
+# The node's three functions, each switched on or off in .env (all on by
+# default). Settings listed here are only required while their function is on.
+FEATURES = {
+    "doors": ("ENABLE_DOORS", ("RELAY_URL", "RELAY_PWD")),
+    "camera": ("ENABLE_CAMERA", ("CAM_HOST", "CAM_RTSP")),
+    "odour": ("ENABLE_ODOUR", ()),
+}
+
+
+def enabled(feature):
+    """True when that function (doors / camera / odour) is on in the environment."""
+    return _bool(FEATURES[feature][0], True)
+
 
 def _qr_api_url(admin_url):
     """QR_API_URL as a full URL, or a path appended to ADMIN_URL. '' = off."""
@@ -178,7 +191,12 @@ def _validate_doors(doors):
 class Settings:
     facility_id: str
 
-    # KC868-A4S
+    # The three functions (FEATURES); off = no jobs, checks or endpoints for it
+    enable_doors: bool
+    enable_camera: bool
+    enable_odour: bool
+
+    # KC868-A4S (doors)
     relay_url: str
     relay_pwd: str
     doors: Tuple[DoorSpec, ...]
@@ -268,11 +286,18 @@ class Settings:
     @classmethod
     def from_env(cls):
         admin_url = _required("ADMIN_URL").rstrip("/")
+        doors_on, camera_on, odour_on = (enabled(f) for f in ("doors", "camera", "odour"))
+        if not (doors_on or camera_on or odour_on):
+            raise ConfigError("ENABLE_DOORS, ENABLE_CAMERA and ENABLE_ODOUR are all off: "
+                              "turn at least one on")
         return cls(
             facility_id=_required("FACILITY_ID"),
-            relay_url=_required("RELAY_URL").rstrip("/"),
-            relay_pwd=_required("RELAY_PWD"),
-            doors=_parse_doors(),
+            enable_doors=doors_on,
+            enable_camera=camera_on,
+            enable_odour=odour_on,
+            relay_url=_required("RELAY_URL").rstrip("/") if doors_on else "",
+            relay_pwd=_required("RELAY_PWD") if doors_on else "",
+            doors=_parse_doors() if doors_on else (),
             exit_poll_interval=_float("EXIT_POLL_INTERVAL", 0.2),
             admin_url=admin_url,
             admin_key=_required("ADMIN_KEY"),

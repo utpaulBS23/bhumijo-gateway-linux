@@ -35,10 +35,14 @@ usermod -aG gpio,i2c facility
 step "code -> $DEST"
 systemctl stop facility-node 2>/dev/null || true
 mkdir -p "$DEST/docs" "$DATA/snapshots" "$DATA/qr"
+# Drop old code first: modules that moved into door/ camera/ odour/ must not linger
+rm -f "$DEST"/*.py
+rm -rf "$DEST/__pycache__"
 cp "$SRC"/*.py "$SRC"/requirements.txt "$SRC"/.env.example "$DEST"/
 cp "$SRC"/README.md "$SRC"/INSTALL.md "$SRC"/SETUP.md "$DEST/docs/"
-rm -rf "$DEST/dev" "$DEST/firmware" "$DEST/deploy"
-cp -r "$SRC/dev" "$SRC/firmware" "$SRC/deploy" "$DEST"/
+rm -rf "$DEST/dev" "$DEST/firmware" "$DEST/deploy" "$DEST/door" "$DEST/camera" "$DEST/odour"
+cp -r "$SRC/dev" "$SRC/firmware" "$SRC/deploy" "$SRC/door" "$SRC/camera" "$SRC/odour" "$DEST"/
+find "$DEST" -name __pycache__ -prune -exec rm -rf {} +
 rm -f "$DEST"/firmware/*/board_secrets.py   # never ship a board password
 echo "$SRC" > "$DEST/SOURCE"   # where `facility update` pulls from
 if git -C "$SRC" rev-parse --short HEAD >/dev/null 2>&1; then

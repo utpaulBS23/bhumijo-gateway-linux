@@ -13,15 +13,11 @@ Alert subtypes:   forced_open | propped_open | propped_resolved
 import logging
 import threading
 import time
-from datetime import datetime, timezone
 
-from relay import RelayError
+from door.relay import RelayError
+from uplink import iso
 
 log = logging.getLogger("door")
-
-
-def iso(ts):
-    return datetime.fromtimestamp(ts, timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class DoorController:
@@ -83,7 +79,7 @@ class DoorController:
         """QR scanner. Returns 'opened' | 'denied' | 'relay_error'.
 
         Sources in the access log: qr (cached backend token), qr_api (approved
-        online), qr_local (Pi-made code from qr_tool.py).
+        online), qr_local (Pi-made code from door/qr_tool.py).
         """
         if not token:
             return self._deny_qr("empty")

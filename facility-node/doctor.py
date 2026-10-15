@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Check a facility node installation end to end and say what's wrong.
 
-    facility doctor                 (or: sudo -u facility ./venv/bin/python doctor.py)
+    facility doctor                 everything
+    facility doctor door            one function only: door | camera | odour
+    (or: sudo -u facility ./venv/bin/python doctor.py [door|camera|odour])
 
-Checks .env, the database folder, the relay board (password + exit inputs),
-the camera, the admin backend, the QR API, the sensors (I2C or WiFi board), and the running
-service. Read-only: it never fires a relay or changes anything.
-Exit code 0 = all required checks passed.
+Checks .env, the database folder and the admin backend, then each function
+that is switched on: doors (relay board, QR API), camera, odour (sensor board
+or I2C, MQ), and the running service. Read-only: it never fires a relay or
+changes anything. Exit code 0 = all required checks passed.
 """
 
 import argparse
@@ -44,7 +46,7 @@ def tcp_open(host, port, timeout=2.0):
 
 
 def check_config(r, env_path):
-    from config import ConfigError, Settings, load_env_file
+    from config import FEATURES, ConfigError, Settings, enabled, load_env_file
     r.section("Configuration")
     if not os.path.exists(env_path):
         r.line(FAIL, f"{env_path} missing", "run deploy/install.sh")
@@ -54,16 +56,20 @@ def check_config(r, env_path):
     except PermissionError:
         r.line(FAIL, f"cannot read {env_path}", "run as the facility user: facility doctor")
         return None
-    left = [k for k, v in env.items() if v == "CHANGE_ME"]
+    os.environ.update(env)
+    # Settings of a function that is switched off may stay CHANGE_ME
+    unused = {k for f, (_, keys) in FEATURES.items() if not enabled(f) for k in keys}
+    left = [k for k, v in env.items() if v == "CHANGE_ME" and k not in unused]
     if left:
         r.line(FAIL, "values still CHANGE_ME", ", ".join(left))
-    os.environ.update(env)
     try:
         s = Settings.from_env()
     except (ConfigError, ValueError) as e:
         r.line(FAIL, ".env invalid", str(e))
         return None
     r.line(OK, f"facility {s.facility_id}")
+    r.line(OK, "functions", ", ".join(f"{f} {'on' if getattr(s, 'enable_' + f) else 'OFF'}"
+                                      for f in FEATURES))
     for d in s.doors:
         r.line(OK, f"door {d.name}", f"relay {d.relay}, exit input {d.exit_input}, "
                f"reed GPIO {d.reed_gpio}, scanners {', '.join(d.scanner_ips) or 'any'}")
@@ -100,8 +106,8 @@ def check_storage(r, s):
 
 
 def check_relay(r, s):
-    from relay import Relay, RelayAuthError, RelayError
-    r.section(f"Relay board ({s.relay_url})")
+    from door.relay import Relay, RelayAuthError, RelayError
+    r.section(f"Door: relay board ({s.relay_url})")
     relay = Relay(s.relay_url, s.relay_pwd, timeout=3)
     try:
         inputs = relay.read_inputs()
@@ -145,7 +151,8 @@ def check_backend(r, s):
         resp = requests.get(up._url(s.tokens_path), params={"facility": s.facility_id},
                             headers=up.auth_headers(), timeout=8)
     except requests.RequestException as e:
-        r.line(WARN, "not reachable", f"{type(e).__name__}; doors still open from cache")
+        r.line(WARN, "not reachable", f"{type(e).__name__}; events queue on the Pi"
+               + ("; doors still open from cache" if s.enable_doors else ""))
         return
     if resp.status_code in (401, 403):
         r.line(FAIL, f"token pull HTTP {resp.status_code}", "check ADMIN_KEY / ADMIN_AUTH_HEADER")
@@ -154,18 +161,21 @@ def check_backend(r, s):
     else:
         r.line(OK, f"token pull HTTP {resp.status_code}")
 
-    if s.qr_api_url:
-        from qr_api import QRValidator
-        v = QRValidator(s, auth_headers=up.auth_headers() if s.qr_api_auth else {})
-        verdict = v.check("DOCTOR-PROBE-NOT-A-REAL-CODE", None)
-        if verdict == "unavailable":
-            r.line(FAIL, f"QR API {s.qr_api_url}", v.last_error)
-        else:
-            r.line(OK, f"QR API answers ({verdict} for a fake code)")
+
+def check_qr_api(r, s):
+    from door.qr_api import QRValidator
+    from uplink import Uplink
+    up = Uplink(s, store=None)
+    v = QRValidator(s, auth_headers=up.auth_headers() if s.qr_api_auth else {})
+    verdict = v.check("DOCTOR-PROBE-NOT-A-REAL-CODE", None)
+    if verdict == "unavailable":
+        r.line(FAIL, f"QR API {s.qr_api_url}", v.last_error)
+    else:
+        r.line(OK, f"QR API answers ({verdict} for a fake code)")
 
 
 def check_i2c(r, s):
-    r.section("I2C sensors")
+    r.section("Odour: I2C sensors")
     try:
         from smbus2 import SMBus
     except ImportError:
@@ -195,13 +205,13 @@ def check_i2c(r, s):
 
 
 def check_sensor_board(r, s):
-    from sensors_camera import HttpSensors
-    r.section(f"Air sensor board ({s.sensor_url})")
+    from odour.sensors import HttpSensors
+    r.section(f"Odour: air sensor board ({s.sensor_url})")
     import requests
     try:
         data = requests.get(s.sensor_url, timeout=s.sensor_timeout).json()
     except (requests.RequestException, ValueError) as e:
-        r.line(FAIL, "not reachable", f"{e}; check its power, WiFi and IP (SETUP.md section 4a)")
+        r.line(FAIL, "not reachable", f"{e}; check its power, WiFi and IP (SETUP.md section 6.1)")
         return
     if not isinstance(data, dict) or "age_s" not in data:
         r.line(FAIL, "answers, but not like firmware/air-sensor", repr(data)[:120])
@@ -243,25 +253,49 @@ def check_service(r, s):
         r.line(WARN, f"{h['queue']} events waiting", "backend unreachable for a while?")
 
 
+FUNCTIONS = ("door", "camera", "odour")
+
+
+def check_function(r, s, name, offline):
+    """The checks for one function, or a note that it is switched off."""
+    if not getattr(s, "enable_" + ("doors" if name == "door" else name)):
+        r.section(name.capitalize())
+        r.line(OK, "switched off", f"ENABLE_{'DOORS' if name == 'door' else name.upper()}=0")
+        return
+    if name == "door":
+        if not offline:
+            check_relay(r, s)
+            if s.qr_api_url:
+                check_qr_api(r, s)
+    elif name == "camera":
+        if not offline:
+            check_camera(r, s)
+    else:
+        if s.sensor_url and not offline:
+            check_sensor_board(r, s)
+        check_i2c(r, s)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--env", default=os.environ.get("FACILITY_ENV", "/opt/facility-node/.env"))
     p.add_argument("--offline", action="store_true", help="skip network checks")
+    p.add_argument("only", nargs="?", choices=FUNCTIONS,
+                   help="check one function only (default: everything)")
     args = p.parse_args(argv)
 
-    print("Facility node doctor")
+    print("Facility node doctor" + (f": {args.only}" if args.only else ""))
     r = Report()
     s = check_config(r, args.env)
     if s is not None:
-        check_storage(r, s)
-        if not args.offline:
-            check_relay(r, s)
-            check_camera(r, s)
-            check_backend(r, s)
-            if s.sensor_url:
-                check_sensor_board(r, s)
-        check_i2c(r, s)
+        if not args.only:
+            check_storage(r, s)
+            if not args.offline:
+                check_backend(r, s)
+        for name in FUNCTIONS:
+            if args.only in (None, name):
+                check_function(r, s, name, args.offline)
         check_service(r, s)
 
     print(f"\n{r.failed} problem(s), {r.warned} warning(s)")

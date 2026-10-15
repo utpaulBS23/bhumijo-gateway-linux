@@ -15,7 +15,10 @@ facility <command>
   status            service status
   logs              follow the live log (Ctrl-C to stop)
   health            node health as JSON (queue, tokens, doors, camera, odour)
-  doctor            check config, relay, camera, backend, sensors, service
+  doctor [fn]       check config, backend, service and each function;
+                    fn = door | camera | odour to check just that one
+  feature [fn on|off]  the three functions: show, or switch one on/off
+                    e.g.  facility feature camera off
   start|stop|restart
   config            edit /opt/facility-node/.env (restarts the service after)
   test              run the test suite
@@ -44,8 +47,9 @@ case "$cmd" in
     start|stop|restart) sudo systemctl "$cmd" "$SVC" && echo "facility-node: $cmd ok" ;;
     config)  sudo nano "$DIR/.env" && sudo systemctl restart "$SVC" && echo "restarted" ;;
     test)    as_facility test_door.py ;;
-    qr)      as_facility qr_tool.py "$@" ;;
-    mq)      as_facility mq.py "$@" ;;
+    qr)      as_facility -m door.qr_tool "$@" ;;
+    mq)      as_facility -m odour.mq "$@" ;;
+    feature) sudo bash "$DIR/deploy/feature.sh" "$@" ;;
     camera)  sudo bash "$DIR/deploy/camera-setup.sh" "$@" ;;
     sensor)  bash "$DIR/deploy/sensor-setup.sh" "$@" ;;   # sudo only inside, for .env
     docs)

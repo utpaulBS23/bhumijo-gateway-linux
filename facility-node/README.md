@@ -1,7 +1,14 @@
 # Facility Node
 
-Offline-first controller for one public facility, running on a single **Raspberry Pi 5**.
-It unlocks two doors (male and female) by QR code or attendant app, logs exits, detects forced and propped doors, watches air quality and odour, checks the IP camera, and reports everything to the admin backend.
+Offline-first controller for one public facility, running on a single **Raspberry Pi 5**. It has three functions, each switched on or off on its own (`ENABLE_DOORS`, `ENABLE_CAMERA`, `ENABLE_ODOUR`):
+
+| # | Function | What it does | Code |
+|---|---|---|---|
+| 1 | **Door lock / unlock** | Unlocks two doors (male and female) by QR code or attendant app, logs exits, detects forced and propped doors | `door/` |
+| 2 | **Camera monitoring** | Checks the IP camera is reachable and its feed live; snapshots on door alerts | `camera/` |
+| 3 | **Odour monitoring** | Reads TVOC, eCO2, temperature and humidity, scores TVOC 0–100, raises odour alerts | `odour/` |
+
+Everything is reported to the admin backend.
 
 **The internet is never in the unlock path.** Codes are checked against a local cache, every event is queued on the Pi first, and the exit buttons and magnetic locks keep working in hardware even with the Pi switched off.
 
@@ -50,36 +57,38 @@ On an installed Pi, read them with `facility docs readme | install | setup`.
                                       │ GPIO27: male reed      GPIO22: female reed
 ```
 
-Inside the Pi, a single Python service (`facility-node`, run by systemd):
+Inside the Pi, a single Python service (`facility-node`, run by systemd). Each function only starts its threads when it is on:
 
 ```
- Flask endpoints ──► DoorController (one per door) ──► Relay (KC868 HTTP)
-   /qr /facility/open      │  QR: local cache ⇄ optional QR API
-                           ▼
-                     Store (SQLite) ◄── token pull (every 5 min)
-                     · token cache      · Pi-made codes
-                     · Auth Code hash   · outbox queue ──► Uplink ──► 4 admin APIs (+ snapshot upload)
- Background threads: exit-input poller · reed watcher · door ticker · sensor loop (+ odour monitor)
-                     camera probe · camera frame check · queue flush · token pull
+ 1 door/    Flask /qr /facility/open ──► DoorController (one per door) ──► Relay (KC868 HTTP)
+                                            │  QR: local cache ⇄ optional QR API
+            threads: exit-input poller · reed watcher · door ticker · token pull (5 min)
+ 2 camera/  threads: camera probe (30 s) · frame check (5 min) · snapshot on door alerts
+ 3 odour/   thread:  sensor loop (60 s): ENS160/AHT20 (I2C or WiFi board) [+ MQ] → TVOC score → odour monitor
+
+ shared     Store (SQLite): token cache · Pi-made codes · Auth Code hash · outbox queue
+            Uplink: outbox ──► 4 admin APIs (+ snapshot upload) · thread: queue flush
 ```
 
 ---
 
 ## 2. Features
 
-| Area | What it does |
-|---|---|
-| **QR unlock** | Each scanner opens its own door (routed by scanner IP). Checked against the local cache, optionally plus a live **QR validation API**. Any valid code opens either door |
-| **Facility app unlock** | Attendant phone sends the per-facility **Auth Code** and the door name |
-| **Pi-made QR codes** | `facility qr create`: test, staff and commissioning codes that expire after 24 h by default |
-| **Exit tracking** | Exit button opens the door in hardware; a second contact into the KC868 lets the Pi log an `exit` |
-| **Door anomalies** | Reed switch per door: `forced_open` (opened with no trigger), `propped_open` (repeats while open), `propped_resolved` |
-| **Air quality** | ENS160 (TVOC, eCO2, AQI) + AHT20 (temperature, humidity) every 60 s |
-| **Odour** | Optional MQ-135 (ammonia) and MQ-136 (H2S) through an ADS1115; `odour_high` / `odour_resolved` alerts against per-site limits |
-| **Camera** | Reachability probe, frozen-feed detection, JPEG snapshots on door anomalies, optional upload |
-| **Offline-first** | Doors open with no internet; events queue on the Pi and drain oldest-first when the backend is back |
-| **Self-check** | `facility doctor` checks config, relay, camera, backend, sensors and the service in one go |
-| **Resilience** | Hardware watchdog, auto-restart, survives power cuts (SQLite WAL), warm-spare procedure |
+| Function | Feature | What it does |
+|---|---|---|
+| 1 Door | **QR unlock** | Each scanner opens its own door (routed by scanner IP). Checked against the local cache, optionally plus a live **QR validation API**. Any valid code opens either door |
+| 1 Door | **Facility app unlock** | Attendant phone sends the per-facility **Auth Code** and the door name |
+| 1 Door | **Pi-made QR codes** | `facility qr create`: test, staff and commissioning codes that expire after 24 h by default |
+| 1 Door | **Exit tracking** | Exit button opens the door in hardware; a second contact into the KC868 lets the Pi log an `exit` |
+| 1 Door | **Door anomalies** | Reed switch per door: `forced_open` (opened with no trigger), `propped_open` (repeats while open), `propped_resolved` |
+| 2 Camera | **Camera health** | Reachability probe, frozen-feed detection; set up with `facility camera` |
+| 2 Camera | **Snapshots** | JPEG on door anomalies, optional upload |
+| 3 Odour | **Air quality** | ENS160 (TVOC, eCO2, AQI) + AHT20 (temperature, humidity) every 60 s, on the Pi's I2C or an ESP32-S3 WiFi board (`facility sensor`) |
+| 3 Odour | **TVOC score + odour alert** | TVOC as 0–100 with five levels; `odour_high` / `odour_resolved` alerts against per-site limits; optional MQ-135 (ammonia) and MQ-136 (H2S) through an ADS1115 |
+| all | **Function switches** | `facility feature camera off`: a site runs only the functions it has hardware for |
+| all | **Offline-first** | Doors open with no internet; events queue on the Pi and drain oldest-first when the backend is back |
+| all | **Self-check** | `facility doctor` checks config, backend and every function that is on; `facility doctor door` (`camera`, `odour`) checks one |
+| all | **Resilience** | Hardware watchdog, auto-restart, survives power cuts (SQLite WAL), warm-spare procedure |
 
 ---
 
@@ -114,26 +123,26 @@ The full walkthrough is in **[INSTALL.md](INSTALL.md)**. Wiring and commissionin
 
 ### Per facility
 
-| Item | Notes |
-|---|---|
-| Raspberry Pi 5 (4 GB) + endurance microSD + 5V/5A supply | Runs everything |
-| KC868-A4S relay board | Patched firmware in `firmware/kc868/` |
-| Per door ×2: timer relay module, 12V mag lock, DPDT exit button, QR scanner, MC-38 reed (optional) | Locks fail open on power loss |
-| ENS160 + AHT20 | On the Pi's I2C, **or** on an ESP32-S3 Feather WiFi board (`firmware/air-sensor/`) |
-| ADS1115 + MQ-135 + MQ-136 (optional) | I2C + analog, with a voltage divider on each MQ output |
-| IP camera (existing) | RTSP |
-| Router + mini DC-UPS | The UPS powers the Pi, router and camera, **not** the locks |
+| Function | Item | Notes |
+|---|---|---|
+| shared | Raspberry Pi 5 (4 GB) + endurance microSD + 5V/5A supply | Runs everything |
+| shared | Router + mini DC-UPS | The UPS powers the Pi, router and camera, **not** the locks |
+| 1 Door | KC868-A4S relay board | Patched firmware in `firmware/kc868/` |
+| 1 Door | Per door ×2: timer relay module, 12V mag lock, DPDT exit button, QR scanner, MC-38 reed (optional) | Locks fail open on power loss |
+| 2 Camera | IP camera (existing) | RTSP |
+| 3 Odour | ENS160 + AHT20 | On the Pi's I2C, **or** on an ESP32-S3 Feather WiFi board (`firmware/air-sensor/`) |
+| 3 Odour | ADS1115 + MQ-135 + MQ-136 (optional) | I2C + analog, with a voltage divider on each MQ output |
 
 ### IP plan
 
-| Device | IP | Port |
-|---|---|---|
-| Router / gateway | 192.168.10.1 | — |
-| QR scanner male / female | 192.168.10.101 / .102 | → Pi :5454 |
-| Raspberry Pi 5 | 192.168.10.104 | 5454 (LAN only) |
-| Air sensor board (ESP32-S3, optional) | 192.168.10.105 | 80, polled by the Pi |
-| KC868-A4S | 192.168.10.174 | 80 |
-| IP camera | 192.168.10.149 | 554 |
+| Device | Function | IP | Port |
+|---|---|---|---|
+| Router / gateway | shared | 192.168.10.1 | — |
+| Raspberry Pi 5 | shared | 192.168.10.104 | 5454 (LAN only) |
+| QR scanner male / female | 1 Door | 192.168.10.101 / .102 | → Pi :5454 |
+| KC868-A4S | 1 Door | 192.168.10.174 | 80 |
+| IP camera | 2 Camera | 192.168.10.149 | 554 |
+| Air sensor board (ESP32-S3, optional) | 3 Odour | 192.168.10.105 | 80, polled by the Pi |
 
 All of these are static and **outside the DHCP pool**. Only phones use DHCP.
 
@@ -147,6 +156,8 @@ All of these are static and **outside the DHCP pool**. Only phones use DHCP.
 ---
 
 ## 5. How decisions are made
+
+Sections 5.1–5.3 are the door function, 5.4 the odour function.
 
 ### 5.1 QR scan → door
 
@@ -200,21 +211,24 @@ Any metric (`tvoc`, `tvoc_score`, `aqi`, `nh3_ppm`, `h2s_ppm`) at or above its l
 
 All settings live in `/opt/facility-node/.env`, loaded by systemd. **`.env.example` documents every key.** Edit with `facility config`. The service refuses to start on a missing secret or a conflicting door map, and says why.
 
-| Group | Keys | Notes |
-|---|---|---|
-| Identity | `FACILITY_ID` | required |
-| Relay | `RELAY_URL`, `RELAY_PWD` | `RELAY_PWD` required |
-| Doors | `DOORS`, `DOOR_<NAME>_RELAY`, `_EXIT_INPUT`, `_REED_GPIO`, `_SCANNER_IPS` | e.g. `DOORS=male,female` |
-| Backend | `ADMIN_URL`, `ADMIN_KEY`, `ADMIN_AUTH_HEADER`, `ADMIN_AUTH_SCHEME`, `SENSOR_PATH`, `DOOR_EVENT_PATH`, `ALERT_PATH`, `TOKENS_PATH` | URL and key required |
-| QR validation | `QR_API_URL`, `_METHOD`, `_ORDER`, `_TIMEOUT`, `_AUTH`, `_TOKEN_FIELD`, `_FACILITY_FIELD`, `_DOOR_FIELD`, `_EXTRA`, `_ALLOW_FIELD`, `_ALLOW_VALUES`, `_DENY_STATUS` | off when `QR_API_URL` is empty |
-| Reed | `REED`, `REED_ACTIVE_HIGH`, `PROPPED_THRESHOLD`, `PROPPED_REPEAT`, `CLASSIFY_WINDOW` | |
-| Camera | `CAM_HOST`, `CAM_PORT`, `CAM_RTSP`, `SNAPSHOT_DIR`, `SNAPSHOT_UPLOAD_PATH`, `SNAPSHOT_KEEP_DAYS` | upload off when the path is empty |
-| Air sensor board | `SENSOR_URL`, `SENSOR_TIMEOUT` | empty URL = ENS160/AHT20 on the Pi's I2C |
-| Odour | `ODOUR_TVOC_SCORE_LIMIT`, `ODOUR_TVOC_LIMIT`, `_AQI_LIMIT`, `_NH3_LIMIT`, `_H2S_LIMIT`, `ODOUR_HOLD`, `_REPEAT`, `_CLEAR_HOLD` | empty limit = metric off |
-| MQ sensors | `MQ`, `ADS1115_ADDR`, `MQ135_CHANNEL`, `MQ136_CHANNEL`, `MQ135_R0`, `MQ136_R0`, `MQ_RL_KOHM`, `MQ_DIVIDER`, `MQ_VC` | R0 from `facility mq calibrate` |
-| Storage | `DB_PATH`, `MAX_QUEUE` | |
-| Timing | `SENSOR_INTERVAL`, `PULL_INTERVAL`, `FLUSH_INTERVAL`, `CAM_PROBE_INTERVAL`, `CAM_FRAME_INTERVAL`, `EXIT_POLL_INTERVAL` | seconds |
-| HTTP | `HOST`, `PORT`, `DOOR_TEST_ENDPOINTS` | keep test endpoints `0` in production |
+| Function | Group | Keys | Notes |
+|---|---|---|---|
+| shared | Identity | `FACILITY_ID` | required |
+| shared | **Functions** | `ENABLE_DOORS`, `ENABLE_CAMERA`, `ENABLE_ODOUR` | `1` (default) / `0`; at least one on. An off function's keys below aren't required. `facility feature` |
+| shared | Backend | `ADMIN_URL`, `ADMIN_KEY`, `ADMIN_AUTH_HEADER`, `ADMIN_AUTH_SCHEME`, `SENSOR_PATH`, `DOOR_EVENT_PATH`, `ALERT_PATH`, `TOKENS_PATH` | URL and key required |
+| shared | Storage | `DB_PATH`, `MAX_QUEUE` | |
+| shared | Timing | `SENSOR_INTERVAL`, `PULL_INTERVAL`, `FLUSH_INTERVAL` | seconds |
+| shared | HTTP | `HOST`, `PORT` | |
+| 1 Door | Relay | `RELAY_URL`, `RELAY_PWD` | `RELAY_PWD` required while doors are on |
+| 1 Door | Doors | `DOORS`, `DOOR_<NAME>_RELAY`, `_EXIT_INPUT`, `_REED_GPIO`, `_SCANNER_IPS`, `EXIT_POLL_INTERVAL` | e.g. `DOORS=male,female` |
+| 1 Door | Reed | `REED`, `REED_ACTIVE_HIGH`, `PROPPED_THRESHOLD`, `PROPPED_REPEAT`, `CLASSIFY_WINDOW` | |
+| 1 Door | QR validation | `QR_API_URL`, `_METHOD`, `_ORDER`, `_TIMEOUT`, `_AUTH`, `_TOKEN_FIELD`, `_FACILITY_FIELD`, `_DOOR_FIELD`, `_EXTRA`, `_ALLOW_FIELD`, `_ALLOW_VALUES`, `_DENY_STATUS` | off when `QR_API_URL` is empty |
+| 1 Door | Bench test | `DOOR_TEST_ENDPOINTS` | keep `0` in production |
+| 2 Camera | Camera | `CAM_HOST`, `CAM_PORT`, `CAM_RTSP`, `CAM_PROBE_INTERVAL`, `CAM_FRAME_INTERVAL` | set with `facility camera` |
+| 2 Camera | Snapshots | `SNAPSHOT_DIR`, `SNAPSHOT_UPLOAD_PATH`, `SNAPSHOT_KEEP_DAYS` | upload off when the path is empty |
+| 3 Odour | Air sensor board | `SENSOR_URL`, `SENSOR_TIMEOUT` | empty URL = ENS160/AHT20 on the Pi's I2C; set with `facility sensor enable` |
+| 3 Odour | Odour alert | `ODOUR_TVOC_SCORE_LIMIT`, `ODOUR_TVOC_LIMIT`, `_AQI_LIMIT`, `_NH3_LIMIT`, `_H2S_LIMIT`, `ODOUR_HOLD`, `_REPEAT`, `_CLEAR_HOLD` | empty limit = metric off |
+| 3 Odour | MQ sensors | `MQ`, `ADS1115_ADDR`, `MQ135_CHANNEL`, `MQ136_CHANNEL`, `MQ135_R0`, `MQ136_R0`, `MQ_RL_KOHM`, `MQ_DIVIDER`, `MQ_VC` | R0 from `facility mq calibrate` |
 
 One `KEY=value` per line, with comments on their own lines. systemd does **not** strip a comment that follows a value.
 
@@ -232,6 +246,8 @@ Port 5454, **facility LAN only**: the firewall blocks everything else, and there
 | `POST /facility/open` | Facility app | `{authCode, door}` or headers `X-Auth-Code` + `X-Door` | `200` · `403` · `400 unknown_door` · `429` · `502` |
 | `GET /health` | Ops | — | queue, tokens, last pull/flush, doors, camera, odour, qr_api |
 | `POST /door/opened?door=…` / `/door/closed?door=…` | Bench tests | — | only if `DOOR_TEST_ENDPOINTS=1` |
+
+With `ENABLE_DOORS=0` every door endpoint answers `404 {"result": "doors_off"}`. `/health` always answers and includes `features: {doors, camera, odour}`; a function that is off shows `null` (camera, odour) or `{}` (doors).
 
 ---
 
@@ -253,7 +269,7 @@ All calls go **Pi → backend**, with header `ADMIN_AUTH_HEADER: ADMIN_AUTH_SCHE
  "camera": {"reachable": true, "streaming": true, "frozen": false, "checked_at": "…"}}
 ```
 
-Values are `null` when a sensor is warming up, failed, or not fitted. `tvoc_score` (0–100) and `tvoc_level` come from `tvoc` (section 5.4) and are `null` with it.
+Values are `null` when a sensor is warming up, failed, or not fitted. `tvoc_score` (0–100) and `tvoc_level` come from `tvoc` (section 5.4) and are `null` with it. With `ENABLE_ODOUR=0` every air value is `null`; with `ENABLE_CAMERA=0`, `camera` is `null`. The push runs while either is on.
 
 ### Push door-event: `POST DOOR_EVENT_PATH` (per event)
 
@@ -296,7 +312,7 @@ The reply **replaces** the cache, so an empty list revokes everything. `expiresA
 ### Optional: QR validation (`QR_API_URL`)
 
 Default request: `POST {"token": "…", "facility": "…", "door": "male"}`. Default reply: `{"allowed": true}`.
-The method, field names, extra fields, reply field, allow values and deny status codes are all configurable (`QR_API_*`). A timeout, network error, 5xx or 401 means "unavailable", and the cache decides. **[SETUP.md](SETUP.md) section 8a** shows how to match an existing backend.
+The method, field names, extra fields, reply field, allow values and deny status codes are all configurable (`QR_API_*`). A timeout, network error, 5xx or 401 means "unavailable", and the cache decides. **[SETUP.md](SETUP.md) section 4.6** shows how to match an existing backend.
 
 ### Optional: snapshot upload (`SNAPSHOT_UPLOAD_PATH`)
 
@@ -340,7 +356,7 @@ Data on the Pi (`/var/lib/facility/`):
 - **Relay firmware:** returns 401 on a wrong password and never logs it.
 - **Pi-made codes:** expire after 24 h by default. `--no-expiry` needs an explicit flag and shows a warning. Revoke them with `facility qr revoke`.
 - **Dummy QR API (`dev/`):** for testing only. The node and `facility doctor` both warn when `QR_API_URL` points at localhost.
-- **Before handover:** work through the checklist in SETUP.md section 13.
+- **Before handover:** work through the checklist in SETUP.md section 11.
 
 ---
 
@@ -348,7 +364,8 @@ Data on the Pi (`/var/lib/facility/`):
 
 | Task | Command |
 |---|---|
-| Is it healthy? | `facility doctor` · `facility health` |
+| Is it healthy? | `facility doctor` · `facility doctor door` (`camera`, `odour`) · `facility health` |
+| Functions on/off | `facility feature` · `facility feature camera off` |
 | Live log | `facility logs` |
 | Restart | `facility restart` |
 | Change settings | `facility config` |
@@ -368,7 +385,7 @@ Runs on any machine with Python 3.9+. No Pi or hardware is needed for the tests.
 ```bash
 cd facility-node
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python test_door.py            # 112 tests
+.venv/bin/python test_door.py            # 129 tests
 ```
 
 The test suite fakes the relay, the backend and the clock. It covers:
@@ -376,7 +393,7 @@ The test suite fakes the relay, the backend and the clock. It covers:
 - every scanner format;
 - QR API orders and fallbacks;
 - odour timing, MQ maths, snapshot upload;
-- config validation and the doctor.
+- config validation, the function switches and the doctor.
 
 **Run the whole node locally against fakes:** start `dev/dummy_qr_api.py` (QR API on :8090), point `RELAY_URL` / `ADMIN_URL` at local stubs, set `HOST=127.0.0.1` and `CAM_RTSP=`, then run `python app.py`. The sensors log I2C errors and report `null`, which is expected off-Pi.
 
@@ -390,19 +407,23 @@ The test suite fakes the relay, the backend and the clock. It covers:
 
 ```
 facility-node/
-├── app.py              Flask endpoints, background jobs, entry point
-├── config.py           Settings from .env (validation, door map, QR API, odour, MQ)
-├── door.py             Per-door unlock decisions, classification, propped/forced alerts
-├── store.py            SQLite: tokens, Pi-made codes, Auth Code hash, outbox
-├── uplink.py           Backend client: queue-first pushes, snapshot upload, token pull
-├── qr_api.py           Configurable online QR validation
-├── relay.py            KC868-A4S HTTP client
-├── inputs.py           Reed switches (gpiozero/lgpio), exit-input poller, door ticker
-├── sensors_camera.py   ENS160/AHT20, camera probe / frame check / snapshots
-├── odour.py            Odour alert state machine
-├── mq.py               ADS1115 + MQ-135/MQ-136; calibrate / read CLI
-├── qr_tool.py          Pi-made unlock QR codes CLI
-├── doctor.py           Installation self-check
+├── app.py              (shared) Flask endpoints, starts each function's jobs, entry point
+├── config.py           (shared) Settings from .env: function switches, validation, door map
+├── store.py            (shared) SQLite: tokens, Pi-made codes, Auth Code hash, outbox
+├── uplink.py           (shared) Backend client: queue-first pushes, snapshot upload, token pull
+├── doctor.py           (shared) Installation self-check, per function
+├── door/               1. Door lock / unlock
+│   ├── controller.py   Per-door unlock decisions, classification, propped/forced alerts
+│   ├── relay.py        KC868-A4S HTTP client
+│   ├── inputs.py       Reed switches (gpiozero/lgpio), exit-input poller, door ticker
+│   ├── qr_api.py       Configurable online QR validation
+│   └── qr_tool.py      Pi-made unlock QR codes CLI (facility qr)
+├── camera/             2. Camera monitoring
+│   └── camera.py       Probe, frozen-feed check, snapshots
+├── odour/              3. Odour monitoring
+│   ├── sensors.py      ENS160/AHT20 (I2C or WiFi board), the 1-minute sensor push
+│   ├── monitor.py      TVOC 0-100 score, odour alert state machine
+│   └── mq.py           ADS1115 + MQ-135/MQ-136; calibrate / read CLI (facility mq)
 ├── test_door.py        Test suite
 ├── requirements.txt    flask, requests, smbus2, qrcode, pypng
 ├── .env.example        Every setting, documented
@@ -412,11 +433,14 @@ facility-node/
 │   ├── githooks/       post-merge / post-rewrite → reinstall on pull
 │   ├── uninstall.sh
 │   ├── facility        `facility` helper command
+│   ├── feature.sh      `facility feature`: switch a function on/off
+│   ├── camera-setup.sh `facility camera`
+│   ├── sensor-setup.sh `facility sensor`
 │   └── facility-node.service
-├── firmware/air-sensor/
+├── firmware/air-sensor/   (3. odour)
 │   ├── main.py         ESP32-S3 + ENS160/AHT20 over WiFi: GET /sensor (MicroPython)
 │   └── board_secrets.py.example  WiFi name, password and IP (real file stays on the board)
-├── firmware/kc868/
+├── firmware/kc868/        (1. door)
 │   ├── main.py         Patched relay firmware (MicroPython)
 │   └── board_secrets.py.example
 ├── dev/

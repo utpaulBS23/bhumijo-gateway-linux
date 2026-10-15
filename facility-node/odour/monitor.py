@@ -15,7 +15,7 @@ import logging
 import threading
 import time
 
-from door import iso
+from uplink import iso
 
 log = logging.getLogger("odour")
 

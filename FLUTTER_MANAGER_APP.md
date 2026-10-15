@@ -12,7 +12,7 @@
 > - **Auth Code, not Facility ID:** the app authenticates with the per-facility Auth Code.
 > - **Removed endpoints:** `/relay/control`, `/relay/status` and `/manager` are gone.
 >
-> See `facility-node/SETUP.md` section 9.
+> See `facility-node/SETUP.md` section 4.7.
 
 ## Overview
 

@@ -9,6 +9,8 @@ LAN only. Never expose port 5454 to the internet.
     POST /door/opened     ?door=<name>       bench test only (DOOR_TEST_ENDPOINTS=1)
     POST /door/closed     ?door=<name>       bench test only (DOOR_TEST_ENDPOINTS=1)
     GET  /health                             liveness + queue size
+
+With ENABLE_DOORS=0 the door endpoints answer 404 doors_off.
 """
 
 import logging
@@ -22,6 +24,9 @@ log = logging.getLogger("app")
 
 STATUS = {"opened": 200, "denied": 403, "relay_error": 502,
           "unknown_scanner": 403, "unknown_door": 400, "rate_limited": 429}
+
+# Door endpoints, switched off with ENABLE_DOORS=0
+DOOR_ENDPOINTS = {"qr", "qrscanner", "rakinda", "facility_open", "door_opened", "door_closed"}
 
 # Field names scanners use for the scanned text, in priority order
 TOKEN_FIELDS = ("token", "SCode", "scode", "cardid", "code", "qr", "data")
@@ -85,6 +90,11 @@ def create_app(settings, doors, store, uplink, camera=None, limiter=None, odour=
     by_scanner = {ip: d for d in doors for ip in d.door.scanner_ips}
     # Single door with no scanner IPs configured: accept scans from anywhere
     any_scanner = doors[0] if len(doors) == 1 and not doors[0].door.scanner_ips else None
+
+    @app.before_request
+    def doors_off():
+        if not doors and request.endpoint in DOOR_ENDPOINTS:
+            return jsonify(ok=False, result="doors_off", door=None), 404
 
     def body():
         return request.get_json(silent=True) or {}
@@ -175,6 +185,8 @@ def create_app(settings, doors, store, uplink, camera=None, limiter=None, odour=
         return jsonify(
             ok=True,
             facility=settings.facility_id,
+            features={"doors": settings.enable_doors, "camera": settings.enable_camera,
+                      "odour": settings.enable_odour},
             queue=store.queue_size(),
             tokens=store.token_count(),
             auth_code_cached=store.get_cred("auth_code_sha256") is not None,
@@ -194,14 +206,15 @@ def create_app(settings, doors, store, uplink, camera=None, limiter=None, odour=
 def main():
     import os
 
+    from camera.camera import Camera, make_snapshotter
     from config import Settings
     from door import DoorController
-    from inputs import ReedSwitch, run_door_ticker, run_exit_poller
-    from relay import Relay
-    from mq import MQSensors
-    from odour import OdourMonitor
-    from qr_api import QRValidator
-    from sensors_camera import Camera, make_sensors, make_snapshotter, run_sensor_loop
+    from door.inputs import ReedSwitch, run_door_ticker, run_exit_poller
+    from door.qr_api import QRValidator
+    from door.relay import Relay
+    from odour.monitor import OdourMonitor
+    from odour.mq import MQSensors
+    from odour.sensors import make_sensors, run_sensor_loop
     from store import Store
     from uplink import Uplink
 
@@ -211,48 +224,59 @@ def main():
     os.makedirs(os.path.dirname(s.db_path), exist_ok=True)
 
     store = Store(s.db_path, s.max_queue)
-    relay = Relay(s.relay_url, s.relay_pwd)
     uplink = Uplink(s, store)
-    camera = Camera(s)
     if any(h in s.admin_url for h in ("localhost", "127.0.0.1")):
         log.warning("ADMIN_URL points at this machine (%s): dummy backend? "
                     "Never leave this on in production", s.admin_url)
-    snapshot = make_snapshotter(camera, uplink)
+
+    # Each function only builds its parts when it is switched on
+    relay = Relay(s.relay_url, s.relay_pwd) if s.enable_doors else None
+    camera = Camera(s) if s.enable_camera else None
+    snapshot = make_snapshotter(camera, uplink) if camera else None
+    odour = OdourMonitor(s, uplink) if s.enable_odour else None
+    sensors = make_sensors(s) if s.enable_odour else None
+    mq = MQSensors(s) if s.enable_odour and s.mq else None
     qr_api = None
-    if s.qr_api_url:
+    if s.enable_doors and s.qr_api_url:
         qr_api = QRValidator(s, auth_headers=uplink.auth_headers() if s.qr_api_auth else {})
         if any(h in s.qr_api_url for h in ("localhost", "127.0.0.1")):
             log.warning("QR_API_URL points at this machine (%s): dummy API? "
                         "Never leave this on in production", s.qr_api_url)
     doors = [DoorController(s, spec, store, relay, uplink, snapshot=snapshot, qr_api=qr_api)
-             for spec in s.doors]
-    odour = OdourMonitor(s, uplink)
-    mq = MQSensors(s) if s.mq else None
+             for spec in s.doors]   # empty when doors are off
 
     stop = threading.Event()
-    jobs = [
-        lambda: uplink.run_pull_loop(stop),
-        lambda: uplink.run_flush_loop(stop),
-        lambda: run_exit_poller(s, relay, doors, stop),
-        lambda: run_door_ticker(doors, stop),
-        lambda: run_sensor_loop(s, make_sensors(s), camera, uplink, stop, mq=mq, odour=odour),
-        lambda: camera.run_probe_loop(stop),
-        lambda: camera.run_frame_loop(stop),
-    ]
+    jobs = [lambda: uplink.run_flush_loop(stop)]
+    if doors:
+        jobs += [lambda: uplink.run_pull_loop(stop),   # tokens + Auth Code
+                 lambda: run_exit_poller(s, relay, doors, stop),
+                 lambda: run_door_ticker(doors, stop)]
+    if sensors or camera:
+        jobs += [lambda: run_sensor_loop(s, sensors, camera, uplink, stop, mq=mq, odour=odour)]
+    if camera:
+        jobs += [lambda: camera.run_probe_loop(stop),
+                 lambda: camera.run_frame_loop(stop)]
     for job in jobs:
         threading.Thread(target=job, daemon=True).start()
 
     # Keep references: a garbage-collected gpiozero Button stops firing callbacks
     reeds = [ReedSwitch(s, d) for d in doors if s.reed and d.door.reed_gpio is not None]
 
+    on = lambda flag: "on" if flag else "OFF"
+    log.info("functions: doors %s, camera %s, odour %s",
+             on(s.enable_doors), on(s.enable_camera), on(s.enable_odour))
     for d in s.doors:
         log.info("door %s: relay %d, exit input %s, reed GPIO %s, scanners %s",
                  d.name, d.relay, d.exit_input, d.reed_gpio, ", ".join(d.scanner_ips) or "any")
-    log.info("air sensors: %s", s.sensor_url or "I2C on the Pi")
-    log.info("odour limits %s; MQ sensors %s; snapshot upload %s", odour.limits or "off",
-             "on" if mq else "off", s.snapshot_upload_path or "off")
-    log.info("QR validation: %s", f"{s.qr_api_method} {s.qr_api_url} ({s.qr_api_order})"
-             if qr_api else "local cache only")
+    if doors:
+        log.info("QR validation: %s", f"{s.qr_api_method} {s.qr_api_url} ({s.qr_api_order})"
+                 if qr_api else "local cache only")
+    if camera:
+        log.info("camera %s; snapshot upload %s", s.cam_host or "not set",
+                 s.snapshot_upload_path or "off")
+    if odour:
+        log.info("air sensors: %s", s.sensor_url or "I2C on the Pi")
+        log.info("odour limits %s; MQ sensors %s", odour.limits or "off", on(mq))
     log.info("facility node %s listening on %s:%d", s.facility_id, s.host, s.port)
     try:
         create_app(s, doors, store, uplink, camera, odour=odour, qr_api=qr_api).run(

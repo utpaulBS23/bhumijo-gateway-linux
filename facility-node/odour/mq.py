@@ -16,7 +16,7 @@ scales 5V to 3.33V; set MQ_DIVIDER=1.5 (= (10k+20k)/20k).
 ppm needs a clean-air calibration (R0) per sensor. After 24-48h burn-in, in
 fresh air, run on the Pi:
 
-    sudo -u facility ./venv/bin/python mq.py calibrate
+    sudo -u facility ./venv/bin/python -m odour.mq calibrate
 
 and paste the printed MQ135_R0 / MQ136_R0 lines into .env. Without R0 the
 node sends nh3_ppm/h2s_ppm as null.

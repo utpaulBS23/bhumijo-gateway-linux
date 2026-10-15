@@ -12,10 +12,11 @@ import requests
 
 from app import FailureLimiter, create_app
 from config import ConfigError, DoorSpec, Settings
+from camera.camera import frames_differ
 from door import DoorController
-from inputs import run_exit_poller
-from relay import Relay, RelayError, parse_states
-from sensors_camera import aht20_decode, ens160_usable, ens160_validity, frames_differ
+from door.inputs import run_exit_poller
+from door.relay import Relay, RelayError, parse_states
+from odour.sensors import aht20_decode, ens160_usable, ens160_validity
 from store import Store
 from uplink import Uplink, parse_expiry
 
@@ -650,7 +651,7 @@ class LocalCodeTests(unittest.TestCase):
         import contextlib
         import io
 
-        import qr_tool
+        from door import qr_tool
         with tempfile.TemporaryDirectory() as d:
             db, out = os.path.join(d, "f.db"), os.path.join(d, "qr")
             buf = io.StringIO()
@@ -679,7 +680,7 @@ class LocalCodeTests(unittest.TestCase):
         import contextlib
         import io
 
-        import qr_tool
+        from door import qr_tool
         with tempfile.TemporaryDirectory() as d:
             with contextlib.redirect_stdout(io.StringIO()):
                 path = qr_tool.write_qr("fn-roundtrip-token-0001", "t", d)
@@ -728,7 +729,7 @@ class SensorBoardTests(unittest.TestCase):
             "ens160_validity": 0, "age_s": 3, "uptime_s": 812}
 
     def board(self, resp):
-        from sensors_camera import HttpSensors
+        from odour.sensors import HttpSensors
         session = FakeSession()
         session.get_resp = resp
         return HttpSensors("http://192.168.10.105/sensor", session=session), session
@@ -764,7 +765,7 @@ class SensorBoardTests(unittest.TestCase):
                                    humidity=None))
 
     def test_setting_picks_the_source(self):
-        from sensors_camera import HttpSensors, Sensors, make_sensors
+        from odour.sensors import HttpSensors, Sensors, make_sensors
         self.assertIsInstance(make_sensors(settings()), Sensors)
         s = settings({"SENSOR_URL": "http://192.168.10.105/sensor", "SENSOR_TIMEOUT": "2"})
         board = make_sensors(s)
@@ -777,7 +778,7 @@ class TvocScoreTests(unittest.TestCase):
     """TVOC ppb -> 0-100 score and level (UBA bands, 20 points each)."""
 
     def test_band_edges(self):
-        from odour import tvoc_level, tvoc_score
+        from odour.monitor import tvoc_level, tvoc_score
         for ppb, score, level in ((0, 0, "very_good"), (220, 20, "very_good"),
                                   (440, 30, "good"), (660, 40, "good"),
                                   (2200, 60, "moderate"), (2400, 61, "dangerous"),
@@ -786,14 +787,14 @@ class TvocScoreTests(unittest.TestCase):
             self.assertEqual((tvoc_score(ppb), tvoc_level(tvoc_score(ppb))), (score, level), ppb)
 
     def test_missing_stays_missing(self):
-        from odour import add_tvoc_score
+        from odour.monitor import add_tvoc_score
         self.assertEqual(add_tvoc_score({"tvoc": None}),
                          {"tvoc": None, "tvoc_score": None, "tvoc_level": None})
         self.assertEqual(add_tvoc_score({}), {"tvoc_score": None, "tvoc_level": None})
 
     def test_sensor_loop_pushes_score(self):
         import threading
-        from sensors_camera import run_sensor_loop
+        from odour.sensors import run_sensor_loop
 
         class OneReading:
             def read(self):
@@ -810,7 +811,7 @@ class TvocScoreTests(unittest.TestCase):
         self.assertEqual((p["tvoc"], p["tvoc_score"], p["tvoc_level"]), (3000, 65, "dangerous"))
 
     def test_alert_from_dangerous(self):
-        from odour import OdourMonitor, add_tvoc_score
+        from odour.monitor import OdourMonitor, add_tvoc_score
         s = settings(odour_tvoc_limit=None, odour_aqi_limit=None, odour_tvoc_score_limit=61,
                      odour_hold=600, odour_repeat=1800, odour_clear_hold=300)
         up, clock = FakeUplink(), Clock()
@@ -830,7 +831,7 @@ class TvocScoreTests(unittest.TestCase):
 
 class OdourTests(unittest.TestCase):
     def setUp(self):
-        from odour import OdourMonitor
+        from odour.monitor import OdourMonitor
         self.s = settings(odour_tvoc_limit=1000, odour_aqi_limit=4, odour_nh3_limit=10,
                           odour_hold=600, odour_repeat=1800, odour_clear_hold=300)
         self.up, self.clock = FakeUplink(), Clock()
@@ -882,7 +883,7 @@ class OdourTests(unittest.TestCase):
         self.assertEqual(self.alerts(), [("odour_high", False)])
 
     def test_disabled_metric_ignored(self):
-        from odour import OdourMonitor
+        from odour.monitor import OdourMonitor
         m = OdourMonitor(replace(self.s, odour_tvoc_limit=None), self.up, clock=self.clock)
         for _ in range(20):
             m.update(dict(tvoc=99999, aqi=1, nh3_ppm=0))
@@ -890,7 +891,7 @@ class OdourTests(unittest.TestCase):
         self.assertEqual(self.up.of("alert"), [])
 
     def test_no_limits_no_alerts(self):
-        from odour import OdourMonitor
+        from odour.monitor import OdourMonitor
         s = replace(self.s, odour_tvoc_limit=None, odour_aqi_limit=None, odour_nh3_limit=None)
         m = OdourMonitor(s, self.up, clock=self.clock)
         m.update(dict(tvoc=99999, aqi=5))
@@ -899,19 +900,19 @@ class OdourTests(unittest.TestCase):
 
 class MQTests(unittest.TestCase):
     def test_ads1115_config_bits(self):
-        from mq import ads1115_config
+        from odour.mq import ads1115_config
         self.assertEqual(ads1115_config(0), 0xC383)
         self.assertEqual(ads1115_config(1), 0xD383)
         with self.assertRaises(ValueError):
             ads1115_config(4)
 
     def test_ads1115_volts(self):
-        from mq import ads1115_volts
+        from odour.mq import ads1115_volts
         self.assertAlmostEqual(ads1115_volts(0x40, 0x00), 2.048)
         self.assertAlmostEqual(ads1115_volts(0xFF, 0xFF), -0.000125)
 
     def test_rs_and_ppm(self):
-        from mq import mq_ppm, mq_rs
+        from odour.mq import mq_ppm, mq_rs
         self.assertAlmostEqual(mq_rs(2.5, 5.0, 10), 10.0)
         self.assertIsNone(mq_rs(0, 5.0, 10))
         self.assertAlmostEqual(mq_ppm(10, 10, "mq135_nh3"), 102.2)
@@ -927,7 +928,7 @@ class MQTests(unittest.TestCase):
             return self.v[ch]
 
     def test_reader_applies_divider_and_r0(self):
-        from mq import MQSensors, mq_ppm
+        from odour.mq import MQSensors, mq_ppm
         s = settings(mq135_r0=10.0, mq136_r0=None)
         # ADS sees 1.6667 V -> sensor 2.5 V after x1.5 divider -> Rs = 10 kOhm
         mq = MQSensors(s, adc=self.FakeADC({0: 2.5 / 1.5, 1: 1.0}), samples=3)
@@ -936,7 +937,7 @@ class MQTests(unittest.TestCase):
         self.assertIsNone(out["h2s_ppm"], "no R0 -> null ppm")
 
     def test_reader_failure_returns_nulls(self):
-        from mq import MQSensors
+        from odour.mq import MQSensors
 
         class Broken:
             def volts(self, ch):
@@ -947,14 +948,14 @@ class MQTests(unittest.TestCase):
         self.assertEqual(mq.read(), {"nh3_ppm": None, "h2s_ppm": None})
 
     def test_calibrate_divides_by_clean_air_ratio(self):
-        from mq import calibrate
+        from odour.mq import calibrate
         adc = self.FakeADC({0: 2.5 / 1.5, 1: 2.5 / 1.5})   # Rs = 10 kOhm on both
         r0 = calibrate({"MQ135_CLEAN_RATIO": "3.6", "MQ136_CLEAN_RATIO": "2.0"},
                        seconds=0, adc=adc)
         self.assertEqual(r0, {"MQ135_R0": round(10 / 3.6, 3), "MQ136_R0": 5.0})
 
     def test_channel_none_skips_sensor(self):
-        from mq import MQSensors
+        from odour.mq import MQSensors
         mq = MQSensors(settings(env={"MQ136_CHANNEL": "none"}), adc=self.FakeADC({0: 1.0}))
         self.assertEqual(list(mq.read()), ["nh3_ppm"])
 
@@ -977,7 +978,7 @@ class SnapshotUploadTests(unittest.TestCase):
         return path
 
     def test_snapshot_uploaded_before_its_alert(self):
-        from sensors_camera import make_snapshotter
+        from camera.camera import make_snapshotter
         self.jpeg("snap1.jpg")
 
         class Cam:
@@ -1017,7 +1018,7 @@ class SnapshotUploadTests(unittest.TestCase):
         self.assertEqual(self.store.queue_size(), 0)
 
     def test_prune_old_snapshots(self):
-        from sensors_camera import Camera
+        from camera.camera import Camera
         old, new = self.jpeg("old.jpg"), self.jpeg("new.jpg")
         os.utime(old, (0, 0))
         cam = Camera(replace(self.s, snapshot_keep_days=7))
@@ -1051,7 +1052,7 @@ def qr_settings(**kw):
 
 class QRValidatorTests(unittest.TestCase):
     def check(self, resp, **kw):
-        from qr_api import QRValidator
+        from door.qr_api import QRValidator
         sess = StubQRSession(lambda d: resp() if callable(resp) else resp)
         v = QRValidator(qr_settings(**kw), session=sess, auth_headers={"X": "k"})
         return v.check("TOKEN-123", "male"), sess
@@ -1093,7 +1094,7 @@ class QRValidatorTests(unittest.TestCase):
         self.assertEqual(self.check(boom)[0], "unavailable")
 
     def test_dig(self):
-        from qr_api import dig
+        from door.qr_api import dig
         self.assertEqual(dig({"a": {"b": [5, {"c": 1}]}}, "a.b.1.c"), 1)
         self.assertIsNone(dig({"a": 1}, "a.b"))
 
@@ -1102,7 +1103,7 @@ class QRApiDoorTests(unittest.TestCase):
     """Door decisions with online validation in both orders."""
 
     def door(self, verdicts, order="local_first"):
-        from qr_api import QRValidator
+        from door.qr_api import QRValidator
         s = qr_settings(env={"QR_API_ORDER": order})
         store = Store(":memory:")
         store.replace_tokens([("cached", None)])
@@ -1172,7 +1173,7 @@ class DummyApiTests(unittest.TestCase):
         import sys
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "dev"))
         from dummy_qr_api import create_app as dummy_app
-        from qr_api import QRValidator
+        from door.qr_api import QRValidator
         client = dummy_app().test_client()
 
         class Bridge:   # route QRValidator's requests into the Flask test client
@@ -1319,6 +1320,52 @@ class DummyBackendTests(unittest.TestCase):
         self.assertEqual(up.flush(), 4)
         counts = self.c.get("/admin/state").json["counts"]
         self.assertEqual(counts, {"door_event": 2, "alert": 0, "sensor": 1, "snapshot": 1})
+
+
+class FeatureTests(unittest.TestCase):
+    """ENABLE_DOORS / ENABLE_CAMERA / ENABLE_ODOUR: each function switches off on its own."""
+
+    def test_all_on_by_default(self):
+        s = settings()
+        self.assertEqual((s.enable_doors, s.enable_camera, s.enable_odour), (True, True, True))
+
+    def test_doors_off_needs_no_relay(self):
+        env = {"ENABLE_DOORS": "0", "RELAY_URL": "", "RELAY_PWD": "CHANGE_ME"}
+        s = settings(env)
+        self.assertEqual((s.enable_doors, s.doors, s.relay_pwd), (False, (), ""))
+
+    def test_all_off_refused(self):
+        with self.assertRaises(ConfigError):
+            settings({"ENABLE_DOORS": "0", "ENABLE_CAMERA": "no", "ENABLE_ODOUR": "off"})
+
+    def test_door_endpoints_off(self):
+        s = settings({"ENABLE_DOORS": "0"})
+        store = Store(":memory:")
+        c = create_app(s, [], store, Uplink(s, store, session=FakeSession())).test_client()
+        for path in ("/qr", "/rakindaqrscanner", "/facility/open"):
+            r = c.post(path, json={"token": "x"})
+            self.assertEqual((r.status_code, r.json["result"]), (404, "doors_off"), path)
+        h = c.get("/health").json
+        self.assertEqual(h["features"], {"doors": False, "camera": True, "odour": True})
+        self.assertEqual(h["doors"], {})
+
+    def test_sensor_push_with_parts_off(self):
+        import threading
+        from odour.sensors import run_sensor_loop
+        up, stop = FakeUplink(), threading.Event()
+        up.enqueue = (lambda orig: lambda kind, p: (orig(kind, p), stop.set()))(up.enqueue)
+        run_sensor_loop(settings(), None, None, up, stop)   # odour and camera off
+        p = up.of("sensor")[0]
+        self.assertEqual((p["tvoc"], p["temperature"], p["tvoc_score"], p["camera"]),
+                         (None, None, None, None))
+
+    def test_doctor_ignores_settings_of_off_functions(self):
+        text = "".join(f"{k}={v}\n" for k, v in ENV.items()).replace("relay-secret", "CHANGE_ME")
+        r, s, out = DoctorTests.run_config_check(None, text + "ENABLE_DOORS=0\n")
+        self.assertEqual(r.failed, 0, out)
+        self.assertIn("doors OFF", out)
+        r, s, out = DoctorTests.run_config_check(None, text)
+        self.assertGreaterEqual(r.failed, 1)
 
 
 class MiscTests(unittest.TestCase):

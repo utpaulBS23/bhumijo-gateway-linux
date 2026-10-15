@@ -181,35 +181,47 @@ facility config
 
 This opens `/opt/facility-node/.env` in nano. **Save with Ctrl-O, Enter, then exit with Ctrl-X.** The service restarts automatically after you exit.
 
-### 7.1 Required: every `CHANGE_ME`
+### 7.1 Functions: what this site has
+
+The node has three functions, all on by default. Switch off the ones this site has no hardware for (SETUP.md section 3.3):
+
+| Setting | Function | Off when… |
+|---|---|---|
+| `ENABLE_DOORS` | Door lock / unlock (relay board, scanners) | the site has no doors to control |
+| `ENABLE_CAMERA` | Camera monitoring | no IP camera |
+| `ENABLE_ODOUR` | Odour monitoring (ENS160 + AHT20) | no air sensors |
+
+Or later, without editing the file: `facility feature camera off`. The settings of an off function may stay `CHANGE_ME`.
+
+### 7.2 Required: every `CHANGE_ME`
 
 | Setting | Value |
 |---|---|
 | `FACILITY_ID` | from the admin backend, e.g. `facility-001` |
-| `RELAY_PWD` | the KC868 board's `POST_PASSWORD` (SETUP.md section 4.3) |
+| `RELAY_PWD` | doors: the KC868 board's `POST_PASSWORD` (SETUP.md section 4.2) |
 | `ADMIN_URL` | backend base URL, e.g. `https://admin.example.com/api` |
 | `ADMIN_KEY` | backend key |
 
-### 7.2 Check for this site
+### 7.3 Check for this site
 
 | Setting | Default | Change if… |
 |---|---|---|
-| `RELAY_URL` | `http://192.168.10.174` | the relay has another IP |
-| `CAM_HOST` / `CAM_RTSP` | `.149` / example URL | always: put the real camera user, password and stream |
+| `RELAY_URL` | `http://192.168.10.174` | doors: the relay has another IP |
+| `CAM_HOST` / `CAM_RTSP` | `.149` / example URL | camera: always; set them with `facility camera` |
 | `DOORS` + `DOOR_MALE_*` / `DOOR_FEMALE_*` | male: Relay01/Input01/GPIO27/.101, female: Relay02/Input02/GPIO22/.102 | wiring or scanner IPs differ |
 | `REED` | `0` | set `1` once the reed switches are fitted |
 | `ADMIN_AUTH_HEADER` / `ADMIN_AUTH_SCHEME` | `Authorization` / `Bearer` | the backend uses another header (e.g. `X-API-Key` with an empty scheme) |
 | `SENSOR_PATH`, `DOOR_EVENT_PATH`, `ALERT_PATH`, `TOKENS_PATH` | `/facility/...` | the backend uses other paths |
 
-### 7.3 Optional features
+### 7.4 Optional features
 
 | Feature | Settings | Guide |
 |---|---|---|
-| Online QR validation | `QR_API_*` | SETUP.md 8a |
-| Air sensors on a WiFi board | `SENSOR_URL` | SETUP.md 4a |
-| Odour alert limits | `ODOUR_*` | SETUP.md 8b |
-| MQ-135 / MQ-136 gas sensors | `MQ=1`, `MQ135_R0`, `MQ136_R0` | SETUP.md 8b |
-| Snapshot upload | `SNAPSHOT_UPLOAD_PATH` | SETUP.md 8c |
+| Online QR validation | `QR_API_*` | SETUP.md 4.6 |
+| Air sensors on a WiFi board | `SENSOR_URL` | SETUP.md 6.1 |
+| Odour alert limits | `ODOUR_*` | SETUP.md 6.4 |
+| MQ-135 / MQ-136 gas sensors | `MQ=1`, `MQ135_R0`, `MQ136_R0` | SETUP.md 6.3 |
+| Snapshot upload | `SNAPSHOT_UPLOAD_PATH` | SETUP.md 5.2 |
 
 Every setting is explained in `.env.example`:
 
@@ -296,7 +308,7 @@ facility status && facility doctor
 
 ✅ **The service came back by itself, and the watchdog is now active.** Check with `systemctl show -p RuntimeWatchdogUSec`, which should print `15s`.
 
-**The Pi software is done.** Continue with **SETUP.md**: scanners (section 7), test QR codes (section 8), commissioning tests (section 10).
+**The Pi software is done.** Continue with **SETUP.md**, one section per function: doors (section 4: scanners 4.4, test QR codes 4.5), camera (section 5), odour (section 6), then the commissioning tests (section 8).
 
 ---
 
@@ -308,12 +320,14 @@ facility status && facility doctor
 | `facility logs` | Live log |
 | `facility health` | Node health JSON |
 | `facility doctor` | Full installation check |
+| `facility doctor door` / `camera` / `odour` | Check one function only |
+| `facility feature` / `facility feature camera off` | Show the three functions, or switch one on/off (restarts, then checks it) |
 | `facility start` / `stop` / `restart` | Control the service |
 | `facility config` | Edit `.env`, then restart |
 | `facility test` | Run the test suite |
 | `facility qr create --label test` | Make an unlock QR (24 h); add `--count 5 --hours 720` for staff codes |
 | `facility qr list` / `facility qr revoke --label test` | List or revoke Pi-made codes |
-| `facility sensor flash` / `upload` / `enable` / `test` | ESP32 air sensor board: flash it, set its WiFi, point the node at it, read it (SETUP.md 4a) |
+| `facility sensor flash` / `upload` / `enable` / `test` | ESP32 air sensor board: flash it, set its WiFi, point the node at it, read it (SETUP.md 6.1) |
 | `facility camera` | Set up or change the IP camera: asks for IP, user, password and brand, tests the stream, then saves and restarts. `test` / `show` / `find` to check it |
 | `facility mq read` / `facility mq calibrate` | MQ gas sensor values / clean-air calibration |
 | `facility docs install` / `setup` / `readme` | Read the docs (q to quit) |
@@ -326,7 +340,7 @@ facility status && facility doctor
 
 | Path | What | Owner / mode |
 |---|---|---|
-| `/opt/facility-node/` | Code, venv, `VERSION` | root:facility |
+| `/opt/facility-node/` | Code (`door/`, `camera/`, `odour/` + shared modules), venv, `VERSION` | root:facility |
 | `/opt/facility-node/.env` | **Site config + secrets** | root:facility 640 |
 | `/opt/facility-node/docs/` | README, INSTALL, SETUP | |
 | `/opt/facility-node/dev/` | Dummy QR API + dummy QR images (testing only) | |
@@ -427,7 +441,7 @@ sudo bash deploy/uninstall.sh --purge    # also deletes the database, snapshots,
 | Doctor: `I2C bus 1 not available` | `sudo raspi-config nonint do_i2c 0 && sudo reboot` |
 | Doctor: `0x38` / `0x53` not found | Sensor wiring (SDA = pin 3, SCL = pin 5, 3.3V = pin 1, GND = pin 9). Check with `sudo i2cdetect -y 1` |
 | Doctor: `wrong relay password` | `RELAY_PWD` ≠ the board's `POST_PASSWORD` |
-| Doctor: `firmware doesn't report inputs` | Flash `firmware/kc868/main.py` (SETUP.md section 4) |
+| Doctor: `firmware doesn't report inputs` | Flash `firmware/kc868/main.py` (SETUP.md section 4.2) |
 | Doctor: `token pull HTTP 401` | `ADMIN_KEY` or `ADMIN_AUTH_HEADER` / `ADMIN_AUTH_SCHEME` wrong |
 | Doctor: `token pull HTTP 404` | `ADMIN_URL` or `TOKENS_PATH` wrong |
 | `facility health`: `Connection refused` | Service not running: `facility logs` shows why |

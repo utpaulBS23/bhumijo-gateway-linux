@@ -5,7 +5,7 @@ Both only observe. Nothing here can stop the door from opening.
 
 import logging
 
-from relay import RelayError
+from door.relay import RelayError
 
 log = logging.getLogger("inputs")
 

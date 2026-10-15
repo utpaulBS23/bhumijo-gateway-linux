@@ -14,13 +14,18 @@ import logging
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 
 log = logging.getLogger("uplink")
 
 MAX_REJECTS = 5
+
+
+def iso(ts):
+    """Unix seconds -> the backend's timestamp format, e.g. 2026-10-15T06:30:00Z."""
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def parse_expiry(value):

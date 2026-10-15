@@ -8,10 +8,10 @@ either door. Codes expire after 24h unless you say otherwise.
 Run on the Pi as the service user so the database stays writable:
 
     cd /opt/facility-node
-    sudo -u facility ./venv/bin/python qr_tool.py create --label test
-    sudo -u facility ./venv/bin/python qr_tool.py create --label cleaners --count 5 --hours 720
-    sudo -u facility ./venv/bin/python qr_tool.py list
-    sudo -u facility ./venv/bin/python qr_tool.py revoke --label test
+    sudo -u facility ./venv/bin/python -m door.qr_tool create --label test
+    sudo -u facility ./venv/bin/python -m door.qr_tool create --label cleaners --count 5 --hours 720
+    sudo -u facility ./venv/bin/python -m door.qr_tool list
+    sudo -u facility ./venv/bin/python -m door.qr_tool revoke --label test
 """
 
 import argparse

@@ -1,19 +1,15 @@
-"""ENS160 + AHT20 (+ optional MQ gas sensors) over I2C, and IP-camera health/snapshots.
+"""Air sensors: ENS160 (TVOC, eCO2, AQI) + AHT20 (temperature, humidity).
 
-Sensor reads use smbus2 (I2C bus 1), or HTTP when the sensors sit on a separate
-WiFi board (SENSOR_URL, firmware/air-sensor). Camera checks shell out to ffmpeg with
-hard timeouts so a hung RTSP stream can never stall the node.
+Read over the Pi's own I2C with smbus2 (bus 1), or over HTTP when the sensors
+sit on the separate WiFi board (SENSOR_URL, firmware/air-sensor). Also the
+1-minute sensor push, which carries the camera health along.
 """
 
 import logging
-import os
-import socket
-import subprocess
-import threading
 import time
 from datetime import datetime, timezone
 
-from odour import add_tvoc_score
+from odour.monitor import add_tvoc_score
 
 log = logging.getLogger("sensors")
 
@@ -178,130 +174,12 @@ def make_sensors(settings):
                            max_age=max(120, 3 * settings.sensor_interval))
     return Sensors()
 
-# ---- camera --------------------------------------------------------------
-
-def tcp_probe(host, port, timeout=2.0):
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
-def _grab_gray_frame(rtsp, timeout=10):
-    """One tiny grayscale frame as raw bytes, or None."""
-    cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-rtsp_transport", "tcp",
-           "-i", rtsp, "-frames:v", "1", "-vf", "scale=64:36,format=gray",
-           "-f", "rawvideo", "-"]
-    try:
-        res = subprocess.run(cmd, capture_output=True, timeout=timeout)
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        log.warning("frame grab failed: %s", e)
-        return None
-    if res.returncode != 0 or len(res.stdout) != 64 * 36:
-        return None
-    return res.stdout
-
-
-def frames_differ(a, b, threshold=1.0):
-    """Mean absolute pixel difference above threshold -> feed is live."""
-    diff = sum(abs(x - y) for x, y in zip(a, b)) / len(a)
-    return diff > threshold
-
-
-class Camera:
-    def __init__(self, settings):
-        self.s = settings
-        self._lock = threading.Lock()
-        self.status = {"reachable": None, "streaming": None, "frozen": None,
-                       "checked_at": None}
-
-    def _update(self, **kw):
-        with self._lock:
-            self.status.update(kw)
-            self.status["checked_at"] = datetime.now(timezone.utc).isoformat()
-
-    def snapshot_status(self):
-        with self._lock:
-            return dict(self.status)
-
-    def probe(self):
-        if not self.s.cam_host:
-            return
-        self._update(reachable=tcp_probe(self.s.cam_host, self.s.cam_port))
-
-    def frame_check(self, gap=3.0):
-        if not self.s.cam_rtsp:
-            return
-        first = _grab_gray_frame(self.s.cam_rtsp)
-        if first is None:
-            self._update(streaming=False, frozen=None)
-            return
-        time.sleep(gap)
-        second = _grab_gray_frame(self.s.cam_rtsp)
-        if second is None:
-            self._update(streaming=False, frozen=None)
-            return
-        self._update(streaming=True, frozen=not frames_differ(first, second))
-
-    def snapshot(self):
-        """Save a JPEG; return its filename as the snapshot ref, or None."""
-        if not self.s.cam_rtsp:
-            return None
-        os.makedirs(self.s.snapshot_dir, exist_ok=True)
-        name = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + ".jpg"
-        path = os.path.join(self.s.snapshot_dir, name)
-        cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-rtsp_transport", "tcp",
-               "-i", self.s.cam_rtsp, "-frames:v", "1", "-q:v", "3", "-y", path]
-        try:
-            res = subprocess.run(cmd, capture_output=True, timeout=10)
-        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-            log.warning("snapshot failed: %s", e)
-            return None
-        if res.returncode != 0:
-            log.warning("snapshot failed: %s", res.stderr.decode(errors="replace")[-200:])
-            return None
-        return name
-
-    def prune_snapshots(self, now=None):
-        """Delete snapshots older than SNAPSHOT_KEEP_DAYS (SD card space)."""
-        if not os.path.isdir(self.s.snapshot_dir):
-            return 0
-        cutoff = (now or time.time()) - self.s.snapshot_keep_days * 86400
-        removed = 0
-        for name in os.listdir(self.s.snapshot_dir):
-            path = os.path.join(self.s.snapshot_dir, name)
-            if name.endswith(".jpg") and os.path.getmtime(path) < cutoff:
-                os.remove(path)
-                removed += 1
-        return removed
-
-    def run_probe_loop(self, stop):
-        while not stop.is_set():
-            self.probe()
-            stop.wait(self.s.cam_probe_interval)
-
-    def run_frame_loop(self, stop):
-        while not stop.is_set():
-            self.frame_check()
-            self.prune_snapshots()
-            stop.wait(self.s.cam_frame_interval)
-
-
-def make_snapshotter(camera, uplink):
-    """snapshot() for the doors: take a JPEG, queue its upload, return its name."""
-    def snapshot():
-        name = camera.snapshot()
-        if name:
-            uplink.queue_snapshot(name, os.path.join(camera.s.snapshot_dir, name),
-                                  datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
-        return name
-    return snapshot
-
 
 def run_sensor_loop(settings, sensors, camera, uplink, stop, mq=None, odour=None):
+    """The 1-minute "sensor" push. sensors=None (odour off) or camera=None
+    (camera off) send nulls for that part, so the backend sees the same fields."""
     while not stop.is_set():
-        reading = sensors.read()
+        reading = sensors.read() if sensors is not None else dict.fromkeys(HttpSensors.KEYS)
         if mq is not None:
             reading.update(mq.read())
         add_tvoc_score(reading)
@@ -311,6 +189,6 @@ def run_sensor_loop(settings, sensors, camera, uplink, stop, mq=None, odour=None
                    "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                    **reading,
                    # Camera health piggybacks the 1-minute push (plan section 6, note)
-                   "camera": camera.snapshot_status()}
+                   "camera": camera.snapshot_status() if camera is not None else None}
         uplink.enqueue("sensor", payload)
         stop.wait(settings.sensor_interval)

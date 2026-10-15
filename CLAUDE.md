@@ -2,7 +2,7 @@
 
 Instructions for Claude Code working in this repo, **on the facility Raspberry Pi** or on a dev machine.
 
-The system is the **facility node** in `facility-node/`: an offline-first door, sensor and camera controller for one Raspberry Pi 5 per facility. Read `facility-node/README.md` for how it works, `facility-node/INSTALL.md` for the Pi install, and `facility-node/SETUP.md` for field setup. The `FLUTTER_*.md` files at the root are the attendant-app design.
+The system is the **facility node** in `facility-node/`: an offline-first controller for one Raspberry Pi 5 per facility, with three functions, each switched on or off in `.env`: **door lock/unlock** (`door/`, `ENABLE_DOORS`), **camera monitoring** (`camera/`, `ENABLE_CAMERA`) and **odour monitoring** (`odour/`, `ENABLE_ODOUR`). Read `facility-node/README.md` for how it works, `facility-node/INSTALL.md` for the Pi install, and `facility-node/SETUP.md` for field setup. The `FLUTTER_*.md` files at the root are the attendant-app design.
 
 ---
 
@@ -50,7 +50,8 @@ Work from the repo root (the folder containing this file). Report briefly after 
    ```bash
    sudo grep -n 'CHANGE_ME' /opt/facility-node/.env | cut -d= -f1
    ```
-   - **Ask the user** for each missing value in one message: `FACILITY_ID`, `RELAY_PWD`, `ADMIN_URL`, `ADMIN_KEY`, and the real `CAM_RTSP`.
+   - **Ask the user** which of the three functions this site has (doors, camera, odour) and switch the others off (`ENABLE_*=0`, or `facility feature <fn> off` once installed).
+   - **Ask the user** for each missing value in one message: `FACILITY_ID`, `ADMIN_URL`, `ADMIN_KEY`, `RELAY_PWD` (doors), and the camera via `facility camera` (camera).
    - Also ask whether these differ from the defaults:
      - the door map (male: Relay01 / Input01 / GPIO27 / scanner .101; female: Relay02 / Input02 / GPIO22 / scanner .102);
      - `REED` (0 until reed switches are fitted);
@@ -85,8 +86,8 @@ Work from the repo root (the folder containing this file). Report briefly after 
 6. **Final report:**
    - `facility version`
    - the doctor summary line
-   - which optional features are on or off (QR API, MQ, snapshot upload, reed)
-   - what's left for the user: SETUP.md §7 scanners, §8 test QR, §10 commissioning tests, §13 security checklist.
+   - which functions are on (`facility feature`) and which optional features are on or off (QR API, MQ, snapshot upload, reed, sensor board)
+   - what's left for the user: SETUP.md §4.4 scanners, §4.5 test QR, the per-function tests (§4.8 door, §5.3 camera, §6.5 odour), §8 commissioning tests, §11 security checklist.
 
 ---
 
@@ -110,12 +111,12 @@ facility doctor
 When the user asks "is it working?", "check", or reports a problem:
 
 ```bash
-facility doctor
+facility doctor            # or one function: facility doctor door | camera | odour
 facility health
 journalctl -u facility-node -n 100 --no-pager
 ```
 
-Match the symptoms against the troubleshooting tables in INSTALL.md §16 and SETUP.md §12, and give the cause and the fix.
+Match the symptoms against the troubleshooting tables in INSTALL.md §16 and SETUP.md (§4.9 door, §5.4 camera, §6.6 odour, §10 general), and give the cause and the fix.
 
 ---
 
@@ -154,6 +155,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
   4. a SETUP/INSTALL section if a field tech needs it.
 - **New backend field or endpoint:** update the README §8 contract **and** `dev/dummy_backend.py`, so the dummy keeps matching the real contract. Every pushed item must keep its `id` (idempotency).
 - **Keep the offline-first rule:** nothing new may put the network or a sensor in the unlock path, or block the door from opening.
+- **Keep the three functions apart:** door code in `door/`, camera in `camera/`, odour in `odour/`; shared code (`app.py`, `config.py`, `store.py`, `uplink.py`, `doctor.py`) at the top. A function that is switched off must start no jobs and need none of its settings (`config.FEATURES`).
 - **Hardware imports** (`smbus2`, `gpiozero`) stay lazy, so tests run off-Pi.
 - **Style:** match the surrounding code (small modules, docstrings that explain why, no new dependencies without need).
 - **Shell scripts:** `bash -n` them; `install.sh` must stay safe to re-run.
@@ -164,14 +166,15 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 | Path | What |
 |---|---|
-| `facility-node/app.py` | Flask endpoints + background jobs (entry point) |
-| `facility-node/config.py` | All settings (`.env`) and validation |
-| `facility-node/door.py` | Unlock decisions, classification, door alerts |
+| `facility-node/app.py` | Flask endpoints + starts each enabled function's jobs (entry point) |
+| `facility-node/config.py` | All settings (`.env`), function switches (`FEATURES`) and validation |
 | `facility-node/store.py` / `uplink.py` | SQLite cache and queue / backend client |
-| `facility-node/qr_api.py` | Configurable online QR validation |
-| `facility-node/sensors_camera.py`, `odour.py`, `mq.py` | Sensors, camera, odour alert, gas sensors |
-| `facility-node/doctor.py` | Installation self-check (`facility doctor`) |
-| `facility-node/deploy/` | `install.sh`, `bootstrap.sh`, `uninstall.sh`, `facility` command, systemd unit, `githooks/` |
-| `facility-node/firmware/kc868/` | Relay board firmware (flashed from a laptop, not the Pi) |
+| `facility-node/doctor.py` | Installation self-check, per function (`facility doctor [door\|camera\|odour]`) |
+| `facility-node/door/` | **1. Door:** `controller.py` unlock decisions + door alerts, `relay.py`, `inputs.py`, `qr_api.py`, `qr_tool.py` |
+| `facility-node/camera/` | **2. Camera:** `camera.py` probe, frozen-feed check, snapshots |
+| `facility-node/odour/` | **3. Odour:** `sensors.py` ENS160/AHT20 + sensor push, `monitor.py` TVOC score + odour alert, `mq.py` gas sensors |
+| `facility-node/deploy/` | `install.sh`, `bootstrap.sh`, `uninstall.sh`, `facility` command, `feature.sh`, `camera-setup.sh`, `sensor-setup.sh`, systemd unit, `githooks/` |
+| `facility-node/firmware/kc868/` | Relay board firmware (door; flashed from a laptop, not the Pi) |
+| `facility-node/firmware/air-sensor/` | ESP32-S3 air sensor board firmware (odour; `facility sensor`) |
 | `/opt/facility-node/` (Pi) | Installed code, venv, `.env`, docs |
 | `/var/lib/facility/` (Pi) | Database, snapshots, QR images |

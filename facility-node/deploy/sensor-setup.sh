@@ -181,7 +181,7 @@ for i, line in enumerate(lines):
         lines[i] = "SENSOR_URL=" + val
         break
 else:
-    lines += ["", "# Air sensors on the ESP32 WiFi board (SETUP.md 4a); empty = Pi I2C",
+    lines += ["", "# Air sensors on the ESP32 WiFi board (SETUP.md 6.1); empty = Pi I2C",
               "SENSOR_URL=" + val]
 open(path, "w").write("\n".join(lines) + "\n")
 PY

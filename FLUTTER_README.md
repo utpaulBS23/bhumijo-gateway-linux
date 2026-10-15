@@ -12,7 +12,7 @@
 > - **Auth Code, not Facility ID:** the app authenticates with the per-facility Auth Code.
 > - **Removed endpoints:** `/relay/control`, `/relay/status` and `/manager` are gone.
 >
-> See `facility-node/SETUP.md` section 9.
+> See `facility-node/SETUP.md` section 4.7.
 
 ## Project Overview
 
@@ -365,7 +365,7 @@ Check pubspec.yaml for latest versions.
 4. **REMOTE_GATEWAY_SETUP.md** (Android) - Gateway configuration
 
 ### Facility Node (the Pi the app talks to)
-- **facility-node/SETUP.md** - Field setup guide (section 9: Facility app)
+- **facility-node/SETUP.md** - Field setup guide (section 4.7: Facility app)
 - **facility-node/README.md** - Endpoints and behaviour
 
 ### Other Integration Points

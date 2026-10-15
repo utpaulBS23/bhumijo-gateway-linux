@@ -51,7 +51,7 @@ ENS160_MODE_STANDARD = 0x02
 wdt = machine.WDT(timeout=30000)
 
 
-# ---- sensors (same register logic as the node's sensors_camera.py) --------
+# ---- sensors (same register logic as the node's odour/sensors.py) --------
 
 def i2c_start():
     if I2C_POWER_PIN is not None:

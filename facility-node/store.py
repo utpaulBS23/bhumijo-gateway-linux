@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS tokens (
     token      TEXT PRIMARY KEY,
     expires_at REAL            -- unix seconds; NULL = no expiry
 );
--- Codes created on the Pi (qr_tool.py): test / commissioning / staff QRs.
+-- Codes created on the Pi (door/qr_tool.py): test / commissioning / staff QRs.
 -- Separate table so the backend pull never overwrites them.
 CREATE TABLE IF NOT EXISTS local_tokens (
     token      TEXT PRIMARY KEY,
@@ -89,7 +89,7 @@ class Store:
     def token_valid(self, token, now=None):
         return self.token_kind(token, now) is not None
 
-    # ---- local tokens (qr_tool.py) --------------------------------------
+    # ---- local tokens (door/qr_tool.py) --------------------------------
 
     def add_local_token(self, token, label, expires_at, now=None):
         now = time.time() if now is None else now
