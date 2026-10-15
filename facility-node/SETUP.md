@@ -143,6 +143,15 @@ At least one must stay on. Each function's settings stay in `.env` when it is of
 ## 4. Door lock / unlock
 
 **Devices:** KC868-A4S relay board (.174), two QR scanners (.101, .102), timer modules, mag locks, DPDT exit buttons, optional MC-38 reed switches.
+
+**Online or offline, by way of opening:**
+
+| Opens with | Internet | Facility WiFi | Internet down |
+|---|---|---|---|
+| QR, paid entry (section 4.6) | **Needed** (balance check + charge) | Not for the user | Refused: "No internet, please try again" |
+| Facility app button (section 4.7) | Not needed | **Needed**: the phone on the facility network | Opens; event saved on the SD card, sent later |
+| Staff code (`facility qr`) | Not needed | Not needed | Opens |
+| Exit button | Not needed | Not needed | Opens, even with the Pi off |
 **Code:** `door/` · **Check:** `facility doctor door`
 
 ### 4.1 Wiring

@@ -87,7 +87,7 @@ Inside the Pi, a single Python service (`facility-node`, run by systemd). Each f
 | 3 Odour | **Air quality** | ENS160 (TVOC, eCO2, AQI) + AHT20 (temperature, humidity) every 60 s, on the Pi's I2C or an ESP32-S3 WiFi board (`facility sensor`) |
 | 3 Odour | **TVOC score + odour alert** | TVOC as 0–100 with five levels; `odour_high` / `odour_resolved` alerts against per-site limits; optional MQ-135 (ammonia) and MQ-136 (H2S) through an ADS1115 |
 | all | **Function switches** | `facility feature camera off`: a site runs only the functions it has hardware for |
-| all | **Offline-first** | Doors open with no internet; events queue on the Pi and drain oldest-first when the backend is back |
+| all | **Offline-first** | The Facility app button, staff codes and exit buttons open with no internet (paid QR entry needs it, by design); events queue on the Pi's SD card and drain oldest-first when the backend is back |
 | all | **Self-check** | `facility doctor` checks config, backend and every function that is on; `facility doctor door` (`camera`, `odour`) checks one |
 | all | **Resilience** | Hardware watchdog, auto-restart, survives power cuts (SQLite WAL), warm-spare procedure |
 
@@ -353,9 +353,21 @@ Multipart `POST` with field `file` (image/jpeg) plus form fields `id`, `facility
 
 ## 9. Offline behaviour and data
 
+**What each way of opening needs** (verified end to end against the dummy backend, including a power cut while offline):
+
+| Opens with | Needs internet? | Needs the facility WiFi? | When the internet is down |
+|---|---|---|---|
+| QR, paid entry (`QR_API_ORDER=api_only`) | **Yes**: the backend checks the balance and charges | No (the scanner is wired to the router) | Refused, scanner shows "No internet, please try again" |
+| QR, other modes / no `QR_API_URL` | No (local token list) | No | Opens from the cached list |
+| Facility app button (customer cash / personal use) | **No** | **Yes**: the phone must be on the facility network (the Pi's firewall allows only `192.168.10.0/24`) | Opens; the event is stored on the SD card and sent when the internet is back |
+| Pi-made staff code (`facility qr`) | No | No | Opens |
+| Exit button | No (hardware) | No | Opens, even with the Pi off |
+
+Every event (entry, refusal, attendant open, alert, reading) is written to the queue in `/var/lib/facility/facility.db` on the SD card **before** it is sent, keeps its original `ts` and `id`, and is sent oldest-first once the backend answers. It survives restarts and power cuts; a retry never creates a duplicate, because the backend de-duplicates on `id`.
+
 | Situation | Behaviour |
 |---|---|
-| Internet / backend down | Cached and Pi-made codes open; Facility app opens; events queue in SQLite |
+| Internet / backend down | Facility app, staff codes and exit buttons open; QR opens from the cache, or is refused with paid entry; events queue in SQLite on the SD card |
 | Backend back | Queue drains oldest-first; nothing lost |
 | QR API down | `local_first` / `api_first`: falls back to the cache within `QR_API_TIMEOUT` (3 s). `api_only` (paid entry): **QR refused** (`reason: offline`); Pi-made staff codes, the Facility app and the exit buttons still open |
 | Relay board down | Unlock returns `502`, nothing is logged as entry; exit buttons still work in hardware |
