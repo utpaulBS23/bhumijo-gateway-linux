@@ -7,6 +7,7 @@ only means alerts go out without a picture.
 
 import logging
 import os
+import re
 import socket
 import subprocess
 import threading
@@ -14,6 +15,12 @@ import time
 from datetime import datetime, timezone
 
 log = logging.getLogger("camera")
+
+
+def hide_login(text):
+    """Blank the user:password in any rtsp:// URL. ffmpeg's errors and
+    TimeoutExpired both repeat the full URL, and logs must never hold it."""
+    return re.sub(r"(rtsp://)[^@\s/]+@", r"\1***:***@", str(text))
 
 
 def tcp_probe(host, port, timeout=2.0):
@@ -32,7 +39,7 @@ def _grab_gray_frame(rtsp, timeout=10):
     try:
         res = subprocess.run(cmd, capture_output=True, timeout=timeout)
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        log.warning("frame grab failed: %s", e)
+        log.warning("frame grab failed: %s", hide_login(e))
         return None
     if res.returncode != 0 or len(res.stdout) != 64 * 36:
         return None
@@ -92,10 +99,11 @@ class Camera:
         try:
             res = subprocess.run(cmd, capture_output=True, timeout=10)
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-            log.warning("snapshot failed: %s", e)
+            log.warning("snapshot failed: %s", hide_login(e))
             return None
         if res.returncode != 0:
-            log.warning("snapshot failed: %s", res.stderr.decode(errors="replace")[-200:])
+            log.warning("snapshot failed: %s",
+                        hide_login(res.stderr.decode(errors="replace")[-300:]))
             return None
         return name
 

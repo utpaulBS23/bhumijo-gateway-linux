@@ -1612,6 +1612,24 @@ class AttendantUseTests(unittest.TestCase):
         self.assertEqual(s.attendant_purposes, ("cleaning", "refill"))
 
 
+class DoorLogTests(unittest.TestCase):
+    """Every reed change shows in the log, not only forced_open."""
+
+    def test_open_close_and_propped_are_logged(self):
+        door, _, _, clock, _ = make_door(reed=True, propped_threshold=300, propped_repeat=180)
+        with self.assertLogs("door", "INFO") as logs:
+            door.qr("good")
+            clock.advance(2)
+            door.door_opened()
+            clock.advance(301)
+            door.tick()
+            door.door_closed()
+        text = "\n".join(logs.output)
+        self.assertIn("[main] door opened (entry 2 s before)", text)
+        self.assertIn("[main] door open 301 s: propped_open", text)
+        self.assertIn("[main] door closed after 301 s", text)
+
+
 class MiscTests(unittest.TestCase):
     def test_required_config(self):
         old = dict(os.environ)
@@ -1645,6 +1663,16 @@ class MiscTests(unittest.TestCase):
         self.assertFalse(ens160_usable(0b00000000, 0))
         self.assertFalse(ens160_usable(0b10000011, 0))    # AQI 0 is "no data"
         self.assertFalse(ens160_usable(0b10001000, 3))    # initial start-up
+
+    def test_camera_logs_hide_the_login(self):
+        from camera.camera import hide_login
+        line = ("Error opening input file rtsp://admin:S3cret%40x@192.168.10.149:554/cam/realmonitor"
+                "?channel=1. Command '['ffmpeg', '-i', 'rtsp://u:p@10.0.0.1/s']' timed out")
+        out = hide_login(line)
+        self.assertNotIn("S3cret", out)
+        self.assertNotIn("u:p@", out)
+        self.assertIn("rtsp://***:***@192.168.10.149:554/cam/realmonitor", out)
+        self.assertEqual(hide_login("rtsp://10.0.0.1/stream1"), "rtsp://10.0.0.1/stream1")
 
     def test_frames_differ(self):
         a = bytes([100] * 64)

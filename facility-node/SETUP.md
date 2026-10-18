@@ -234,7 +234,7 @@ Open `firmware/kc868/main.py` and set:
 PCF8574_INPUT_ADDR = 0x22   # the non-0x24 address you saw
 ```
 
-**3. Set the board password.**
+**3. Set the board password and its fixed IP.**
 
 ```bash
 cd facility-node/firmware/kc868
@@ -243,7 +243,16 @@ python3 -c "import secrets; print(secrets.token_urlsafe(18))"   # copy this
 nano board_secrets.py                                           # POST_PASSWORD = "<paste>"
 ```
 
-Keep this password. It goes into the Pi's `.env` as `RELAY_PWD`. **Never commit `board_secrets.py`.**
+`board_secrets.py` also holds the board's address, already filled in:
+
+```python
+IP = "192.168.10.174"        # the Pi's RELAY_URL points here
+GATEWAY = "192.168.10.1"
+```
+
+The board then always uses .174, with no router setting needed; keep .174 outside the router's DHCP pool. Delete both lines to use DHCP instead (then reserve the address for the board's MAC in the router). After upload, the board's USB console prints `IP Address: 192.168.10.174 (fixed)`.
+
+Keep the password. It goes into the Pi's `.env` as `RELAY_PWD`. **Never commit `board_secrets.py`.**
 
 **4. Upload and restart.**
 
@@ -526,6 +535,7 @@ Then **revoke the test codes**: `facility qr revoke --label test`.
 | Door opens but no `exit` logged | `relay firmware does not report inputs` → firmware not flashed, wrong `PCF8574_INPUT_ADDR`, or polarity (section 4.2, step 5) |
 | Wrong door logs the exit | `DOOR_*_EXIT_INPUT` swapped |
 | False `forced_open` alerts | Reed too close to the mag lock, or polarity: set `REED_ACTIVE_HIGH=1` |
+| Service restarts over and over after `REED=1`, log shows `No such file or directory: '.lgd-nfy…'` | Old service file (the GPIO library needs a writable working folder): re-run `sudo bash deploy/install.sh` |
 | Facility app 400 `unknown_door` | The app isn't sending `door` |
 | Facility app 429 | Too many wrong Auth Codes; wait a minute and check the code |
 

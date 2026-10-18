@@ -8,11 +8,15 @@ Type=simple
 User=facility
 Group=facility
 SupplementaryGroups=gpio i2c
-WorkingDirectory=/opt/facility-node
+# lgpio (reed switches) creates its notify pipe in the working directory, and
+# /opt/facility-node is read-only here (ProtectSystem=strict): run from the
+# service's private /tmp instead. Every path the node uses is absolute.
+WorkingDirectory=/tmp
 EnvironmentFile=/opt/facility-node/.env
 Environment=GPIOZERO_PIN_FACTORY=lgpio
+Environment=LG_WD=/tmp
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/facility-node/venv/bin/python app.py
+ExecStart=/opt/facility-node/venv/bin/python /opt/facility-node/app.py
 Restart=always
 RestartSec=5
 

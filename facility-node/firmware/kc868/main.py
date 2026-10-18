@@ -4,25 +4,40 @@ import uasyncio as asyncio
 import socket
 import time
 
-# Ethernet Setup
-lan = network.LAN(mdc=machine.Pin(23), mdio=machine.Pin(18), power=machine.Pin(5),
-                  phy_type=network.PHY_LAN8720, phy_addr=0,
-                  ref_clk=machine.Pin(17), ref_clk_mode=machine.Pin.OUT)
-lan.active(True)
-lan.ipconfig('addr4')
-
-# Get the network configuration
-network_config = lan.ifconfig()
-ip_address = network_config[0]
-print("IP Address:", ip_address)
-
-# Password lives in board_secrets.py on the board (not in this file).
-# Create it once per site:  POST_PASSWORD = "<long random string>"
+# Password and network live in board_secrets.py on the board (not in this file).
+# Create it once per site from board_secrets.py.example.
 try:
     from board_secrets import POST_PASSWORD as post_password
 except ImportError:
     post_password = None
     print("WARNING: board_secrets.py missing - all requests will be rejected")
+
+# Fixed IP (the Pi's RELAY_URL points at it), e.g. IP = "192.168.10.174".
+# Leave IP out of board_secrets.py to use DHCP (then reserve it in the router).
+try:
+    from board_secrets import IP
+except ImportError:
+    IP = None
+try:
+    from board_secrets import GATEWAY
+except ImportError:
+    GATEWAY = IP.rsplit(".", 1)[0] + ".1" if IP else None   # x.x.x.1
+
+# Ethernet Setup
+lan = network.LAN(mdc=machine.Pin(23), mdio=machine.Pin(18), power=machine.Pin(5),
+                  phy_type=network.PHY_LAN8720, phy_addr=0,
+                  ref_clk=machine.Pin(17), ref_clk_mode=machine.Pin.OUT)
+lan.active(True)
+if IP:
+    try:   # MicroPython 1.24+
+        lan.ipconfig(addr4=IP + "/24", gw4=GATEWAY)
+    except (AttributeError, TypeError, ValueError):   # older firmware
+        lan.ifconfig((IP, "255.255.255.0", GATEWAY, GATEWAY))
+
+# Get the network configuration
+network_config = lan.ifconfig()
+ip_address = network_config[0]
+print("IP Address:", ip_address, "(fixed)" if IP else "(DHCP)")
 relay_states = [0, 0, 0, 0]
 
 # Relay01=ON&hold=5 keeps the relay on for 5 s, then the board releases it by

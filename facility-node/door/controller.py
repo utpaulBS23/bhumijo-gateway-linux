@@ -227,6 +227,10 @@ class DoorController:
         if not legit:
             log.warning("[%s] door opened with no trigger: forced_open", self.name)
             self._alert("forced_open", with_snapshot=True)
+        elif at_boot:
+            log.info("[%s] door open at start", self.name)
+        else:
+            log.info("[%s] door opened (%s %.0f s before)", self.name, trig[0], now - trig[1])
 
     def door_closed(self):
         now = self.clock()
@@ -237,6 +241,7 @@ class DoorController:
             propped = self._propped_alerts > 0
             self._opened_at = None
             self._propped_alerts = 0
+        log.info("[%s] door closed after %d s", self.name, duration)
         self._door_event("door_closed", duration_s=duration)
         if propped:
             self._alert("propped_resolved", duration_s=duration)
@@ -253,6 +258,8 @@ class DoorController:
                 return
             repeat = self._propped_alerts > 0
             self._propped_alerts += 1
+        log.warning("[%s] door open %d s: propped_open%s", self.name, elapsed,
+                    " (repeat)" if repeat else "")
         self._alert("propped_open", with_snapshot=not repeat,
                     duration_s=int(elapsed), repeat=repeat)
 
