@@ -292,6 +292,9 @@ def create_app(settings, doors, store, uplink, cameras=(), limiter=None, odour=N
             queue=store.queue_size(),
             tokens=store.token_count(),
             auth_code_cached=store.get_cred("auth_code_sha256") is not None,
+            # Which code the Facility app is checked against: backend pull, else .env
+            auth_code_source="backend" if store.get_cred("auth_code_sha256") is not None
+            else ("env" if settings.device_auth_code else None),
             last_pull=uplink.last_pull_ok,
             last_flush=uplink.last_flush_ok,
             doors={d.name: {"open": d.is_open, "relay": d.door.relay,

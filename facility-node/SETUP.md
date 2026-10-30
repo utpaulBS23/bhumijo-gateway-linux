@@ -71,7 +71,7 @@ Sections 1–3 are shared by all three functions. Follow the steps in order. Eac
 |---|---|---|
 | Facility ID | Admin backend | all |
 | Admin API URL + key | Backend team | all |
-| Facility-app Auth Code | Admin backend (per facility) | door |
+| Facility-app Auth Code (= Device Auth Code, `DEVICE_AUTH_CODE`) | Admin backend, Device List (per facility) | door |
 | Camera username + password (Imou: Safety Code) | Camera label / app | camera |
 | 2.4 GHz WiFi name + password | Router | odour (ESP32 board) |
 
@@ -490,6 +490,8 @@ In the app's settings:
 | Endpoint URL | `http://192.168.10.104` |
 | Port | `5454` |
 | Auth Code | the facility's Auth Code (from the admin backend), **not** the Facility ID |
+
+The Pi checks it against the code the backend sends in its settings pull. Until the backend sends one, it checks it against `DEVICE_AUTH_CODE` in `.env` (the same code), so set that first: `facility doctor` shows "Facility app checked against DEVICE_AUTH_CODE".
 
 The app's button has two choices, and sends one of these:
 

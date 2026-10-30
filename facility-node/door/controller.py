@@ -10,6 +10,7 @@ Door-event types: entry | attendant | exit | denied | door_closed | relay_failed
 Alert subtypes:   forced_open | propped_open | propped_resolved
 """
 
+import hmac
 import logging
 import threading
 import time
@@ -168,7 +169,7 @@ class DoorController:
         purpose such as cleaning or bath). None = an older app that sends neither.
         Never needs the internet: the backend gets the event from the queue.
         """
-        if not self.store.auth_code_valid(auth_code):
+        if not self._auth_code_ok(auth_code):
             log.info("[%s] Facility app denied", self.name)
             self._door_event("denied", source="facility_app")
             return "denied"
@@ -180,6 +181,17 @@ class DoorController:
             log.info("[%s] attendant open: %s%s", self.name, use,
                      f" ({purpose})" if purpose else "")
         return self._open("attendant", "facility_app", **details)
+
+    def _auth_code_ok(self, presented):
+        """The backend's Auth Code (token pull) once the Pi has one; until then
+        DEVICE_AUTH_CODE from .env, the same per-facility code, so the Facility
+        app works before the backend's settings pull exists."""
+        if self.store.get_cred("auth_code_sha256") is not None:
+            return self.store.auth_code_valid(presented)
+        fallback = self.s.device_auth_code
+        if not (fallback and isinstance(presented, str) and presented):
+            return False
+        return hmac.compare_digest(presented.encode(), fallback.encode())
 
     def _open(self, kind, source, scan_id=None, **details):
         extra = {"scan_id": scan_id} if scan_id else {}

@@ -106,8 +106,14 @@ def check_storage(r, s):
         st = Store(s.db_path)
         r.line(OK, f"database: {st.token_count()} tokens cached, {st.queue_size()} queued, "
                f"{len(st.list_local_tokens())} Pi-made codes")
-        if not st.get_cred("auth_code_sha256"):
-            r.line(WARN, "no Facility-app Auth Code cached yet", "backend pull must send authCode")
+        if st.get_cred("auth_code_sha256"):
+            r.line(OK, "Facility-app Auth Code from the backend")
+        elif s.device_auth_code:
+            r.line(OK, "Facility app checked against DEVICE_AUTH_CODE",
+                   "until the backend pull sends authCode")
+        else:
+            r.line(WARN, "no Facility-app Auth Code yet", "Facility app refused: set "
+                   "DEVICE_AUTH_CODE, or the backend pull must send authCode")
         st.close()
     else:
         r.line(WARN, "database not created yet", "start the service once")

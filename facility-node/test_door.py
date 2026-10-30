@@ -1900,6 +1900,42 @@ class AttendantUseTests(unittest.TestCase):
         self.assertEqual(s.attendant_purposes, ("cleaning", "refill"))
 
 
+class AuthCodeFallbackTests(unittest.TestCase):
+    """Facility app before the backend's settings pull exists: DEVICE_AUTH_CODE
+    from .env, until the backend sends authCode."""
+
+    def app(self, env):
+        s = settings({**TWO_DOORS, **env})
+        store = Store(":memory:")
+        relay, up = FakeRelay(), FakeUplink()
+        doors = [DoorController(s, spec, store, relay, up, spawn=lambda fn: fn())
+                 for spec in s.doors]
+        c = create_app(s, doors, store, Uplink(s, store, session=FakeSession())).test_client()
+        return c, store, relay
+
+    def open(self, c, code, door):
+        return c.post("/facility/open", json={"authCode": code, "door": door}).status_code
+
+    def test_env_code_opens_both_doors_until_backend_sends_one(self):
+        c, store, relay = self.app({"DEVICE_AUTH_CODE": "fac-code-9"})
+        self.assertEqual(c.get("/health").json["auth_code_source"], "env")
+        self.assertEqual(self.open(c, "fac-code-9", "male"), 200)
+        self.assertEqual(self.open(c, "fac-code-9", "female"), 200)
+        self.assertEqual(self.open(c, "wrong", "male"), 403)
+        self.assertEqual(relay.fired, [1, 2])
+        store.set_auth_code("backend-code")   # the backend pull arrived
+        self.assertEqual(c.get("/health").json["auth_code_source"], "backend")
+        self.assertEqual(self.open(c, "fac-code-9", "male"), 403, "backend code wins")
+        self.assertEqual(self.open(c, "backend-code", "male"), 200)
+
+    def test_no_code_anywhere_refuses(self):
+        c, _, relay = self.app({})
+        self.assertIsNone(c.get("/health").json["auth_code_source"])
+        self.assertEqual(self.open(c, "", "male"), 403)
+        self.assertEqual(self.open(c, "anything", "male"), 403)
+        self.assertEqual(relay.fired, [])
+
+
 class DoorLogTests(unittest.TestCase):
     """Every reed change shows in the log, not only forced_open."""
 

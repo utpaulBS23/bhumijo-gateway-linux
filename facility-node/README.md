@@ -183,7 +183,7 @@ Every API call carries a fresh `scan_id`. A scanner repeating the same code at t
 
 ### 5.2 Facility app
 
-`POST /facility/open {authCode, door}` → the Auth Code is compared with the cached hash → `attendant`.
+`POST /facility/open {authCode, door}` → the Auth Code is compared with the hash the backend sent (`authCode` in the token pull); until the Pi has one, with `DEVICE_AUTH_CODE` from `.env` (the same per-facility code) → `attendant`. `door` (`male` / `female`) picks the relay.
 Five failures from one phone in 60 s → `429` for a minute.
 
 ### 5.3 Classifying a physical opening (reed switch)
@@ -230,7 +230,7 @@ All settings live in `/opt/facility-node/.env`, loaded by systemd. **`.env.examp
 | 1 Door | Unlock time | `UNLOCK_SECONDS` (all doors), `DOOR_<NAME>_UNLOCK_SECONDS` | 1–30 s, default 5; `facility door delay male 8` |
 | 1 Door | Reed | `REED`, `REED_ACTIVE_HIGH`, `PROPPED_THRESHOLD`, `PROPPED_REPEAT`, `CLASSIFY_WINDOW` | |
 | 1 Door | QR validation | `QR_API_URL`, `_METHOD`, `_ORDER`, `_TIMEOUT`, `_AUTH`, `_TOKEN_FIELD`, `_FACILITY_FIELD`, `_DOOR_FIELD`, `_EXTRA`, `_ALLOW_FIELD`, `_ALLOW_VALUES`, `_DENY_STATUS`, `_SCAN_ID_FIELD`, `_REASON_FIELD`, `QR_DEDUP_SECONDS` | off when `QR_API_URL` is empty; `QR_API_ORDER=api_only` = paid entry |
-| 1 Door | QR device auth | `QR_API_AUTH_HEADER`, `DEVICE_AUTH_CODE` | e.g. `Device-Auth-Code`: the QR check sends the facility's Device Auth Code (secret, required once the header is set) instead of the admin key |
+| 1 Door | QR device auth | `QR_API_AUTH_HEADER`, `DEVICE_AUTH_CODE` | e.g. `Device-Auth-Code`: the QR check sends the facility's Device Auth Code (secret, required once the header is set) instead of the admin key. `DEVICE_AUTH_CODE` is also the Facility app's code until the backend pull sends `authCode` |
 | 1 Door | Attendant purposes | `ATTENDANT_PURPOSES` | what personal use may be for; default `cleaning,bath,toilet,maintenance` |
 | 1 Door | Scanner messages | `SCANNER_MSG_OPENED`, `_NO_BALANCE`, `_OFFLINE`, `_DENIED`, `_ERROR` | what the scanner shows; English defaults |
 | 1 Door | Bench test | `DOOR_TEST_ENDPOINTS` | keep `0` in production |
