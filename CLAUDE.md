@@ -143,7 +143,7 @@ Match the symptoms against the troubleshooting tables in INSTALL.md §16 and SET
 
 ```bash
 cd facility-node
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+python3 -m venv .venv && .venv/bin/pip install -e .
 .venv/bin/python test_door.py          # must end with OK
 ```
 

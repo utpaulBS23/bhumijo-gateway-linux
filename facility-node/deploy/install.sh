@@ -38,7 +38,7 @@ mkdir -p "$DEST/docs" "$DATA/snapshots" "$DATA/qr"
 # Drop old code first: modules that moved into door/ camera/ odour/ must not linger
 rm -f "$DEST"/*.py
 rm -rf "$DEST/__pycache__"
-cp "$SRC"/*.py "$SRC"/requirements.txt "$SRC"/.env.example "$DEST"/
+cp "$SRC"/*.py "$SRC"/requirements.txt "$SRC"/pyproject.toml "$SRC"/.env.example "$DEST"/
 cp "$SRC"/README.md "$SRC"/INSTALL.md "$SRC"/SETUP.md "$DEST/docs/"
 rm -rf "$DEST/dev" "$DEST/firmware" "$DEST/deploy" "$DEST/door" "$DEST/camera" "$DEST/odour"
 cp -r "$SRC/dev" "$SRC/firmware" "$SRC/deploy" "$SRC/door" "$SRC/camera" "$SRC/odour" "$DEST"/
@@ -55,7 +55,7 @@ step "python environment"
 # --system-site-packages: use apt's gpiozero/lgpio inside the venv
 [ -d "$DEST/venv" ] || python3 -m venv --system-site-packages "$DEST/venv"
 "$DEST/venv/bin/pip" install -q --upgrade pip
-"$DEST/venv/bin/pip" install -q -r "$DEST/requirements.txt"
+"$DEST/venv/bin/pip" install -q "$DEST"
 
 step "configuration"
 if [ "$FIRST_INSTALL" = 1 ]; then
