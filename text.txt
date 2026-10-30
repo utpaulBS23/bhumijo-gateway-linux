@@ -1,0 +1,24 @@
+  POST /api/user/accesses
+  Headers:
+    Device-Auth-Code: <auth_code from physical IoT device>
+    Content-Type: application/json
+  Body:
+  {
+    "service_id": 1,                                    // integer, facility service ID
+    "gender": "male",                                   // "Male", "Female", "Other" (case-insensitive)
+    "device_access_token": "BHU-62AB420EA75D10.29957199"  // scanned from QR code
+  }
+
+
+  POST /api/user/accesses
+    ↓ Uses the scanned identifier
+  Access granted
+  Related Files:
+  - /app/Http/Controllers/Api/Auth/OtpController.php - Where identifier is created
+  - /app/Support/Generator/User/Generator.php - Identifier generator (line 12)
+  - /app/Http/Controllers/User/UserAccessController.php:initiate() - Returns token for display
+  - /app/Models/AccessDevice.php - Stores the identifier
+
+❯ /api/user/accesses what is the output
+
+  Searched for 3 patterns, read 2 files, ran 1 shell command
