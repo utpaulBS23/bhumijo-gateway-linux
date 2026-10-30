@@ -619,6 +619,22 @@ class ScannerFormatTests(unittest.TestCase):
         self.assertEqual(r.json["ResultCode"], "0")
         self.assertEqual(self.relay.fired, [2])
 
+    def test_api_device_code_path(self):
+        with self.assertLogs("app", "INFO") as logs:
+            r = self.c.post("/api/device/code", json={"code": "good"}, environ_base=self.env)
+        self.assertEqual(r.json["result"], "opened")
+        self.assertTrue(any("/api/device/code" in m and "4 chars" in m for m in logs.output))
+        self.assertFalse(any("good" in m for m in logs.output))   # code never logged
+        with self.assertLogs("app", "WARNING") as logs:
+            r = self.c.post("/api/device/code", json={"other": "secret"}, environ_base=self.env)
+        self.assertEqual(r.status_code, 403)
+        self.assertTrue(any("no code found" in m and "['other']" in m for m in logs.output))
+        self.assertFalse(any("secret" in m for m in logs.output))
+
+    def test_long_code_logged_by_tail_only(self):
+        from app import masked
+        self.assertEqual(masked("abcdefgh12345678"), "16 chars, ends ...5678")
+
     def test_compat_routes_still_route_by_scanner_ip(self):
         r = self.c.post("/rakindaqrscanner", json={"SCode": "good"},
                         environ_base={"REMOTE_ADDR": "10.9.9.9"})

@@ -3,6 +3,7 @@
 LAN only. Never expose port 5454 to the internet.
 
     POST /qr              {token}            QR scanner; door chosen by scanner IP
+    POST /api/device/code {token}            same as /qr, for scanners with that fixed path
     GET|POST /qrscanner   ?cardid=..         same, legacy scanner format + response
     POST /rakindaqrscanner {SCode}           same, Rakinda format + response
     POST /facility/open   {authCode, door}   Facility app; door = section name
@@ -111,6 +112,23 @@ def scanned_token(req):
     return None
 
 
+def masked(token):
+    """Log form of a scanned code: its length and, for long codes, the last 4
+    characters. The whole code opens the door, so it never goes in the log."""
+    tail = f", ends ...{token[-4:]}" if len(token) >= 12 else ""
+    return f"{len(token)} chars{tail}"
+
+
+def body_shape(req):
+    """What a scan without a code looked like: field names only, no values."""
+    data = req.get_json(silent=True)
+    if isinstance(data, dict):
+        return f"JSON fields {sorted(data)}"
+    if req.form:
+        return f"form fields {sorted(req.form)}"
+    return f"{len(req.get_data())} bytes"
+
+
 class FailureLimiter:
     """Blocks a client IP after too many denied unlocks (guessing the Auth Code)."""
 
@@ -193,7 +211,17 @@ def create_app(settings, doors, store, uplink, camera=None, limiter=None, odour=
         door = by_scanner.get(request.remote_addr) or any_scanner
         if door is None:
             log.warning("scan from unknown scanner %s", request.remote_addr)
-        return attempt(door, "qr", scanned_token(request))
+        token = scanned_token(request)
+        # Commissioning aid: shows whether the scanner's code arrives and in
+        # what shape. Drop once all scanners are confirmed working.
+        if token:
+            log.info("scan %s from %s: code %s", request.path, request.remote_addr,
+                     masked(token))
+        else:
+            log.warning("scan %s from %s: no code found (content-type %r, %s)",
+                        request.path, request.remote_addr, request.content_type,
+                        body_shape(request))
+        return attempt(door, "qr", token)
 
     def named_door(name):
         if name is None and len(doors) == 1:
@@ -201,6 +229,7 @@ def create_app(settings, doors, store, uplink, camera=None, limiter=None, odour=
         return by_name.get(str(name).strip().lower()) if name else None
 
     @app.post("/qr")
+    @app.post("/api/device/code")   # path some scanners' firmware posts to
     def qr():
         return reply(*scan())
 
