@@ -17,8 +17,9 @@ Everything is reported to the admin backend.
 | **README.md** (this file) | How the system works, the configuration and API reference |
 | **[INSTALL.md](INSTALL.md)** | Installing the software on the Raspberry Pi, step by step |
 | **[SETUP.md](SETUP.md)** | Field setup: wiring, relay firmware, scanners, QR codes, sensors, commissioning |
+| **[API_FLOW.md](API_FLOW.md)** | Who calls whom: customer QR, Facility app, alerts, settings pull, delivery (for backend and app developers) |
 
-On an installed Pi, read them with `facility docs readme | install | setup`.
+On an installed Pi, read them with `facility docs readme | install | setup | api`.
 
 ---
 

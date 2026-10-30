@@ -39,7 +39,7 @@ mkdir -p "$DEST/docs" "$DATA/snapshots" "$DATA/qr"
 rm -f "$DEST"/*.py
 rm -rf "$DEST/__pycache__"
 cp "$SRC"/*.py "$SRC"/requirements.txt "$SRC"/pyproject.toml "$SRC"/.env.example "$DEST"/
-cp "$SRC"/README.md "$SRC"/INSTALL.md "$SRC"/SETUP.md "$DEST/docs/"
+cp "$SRC"/README.md "$SRC"/INSTALL.md "$SRC"/SETUP.md "$SRC"/API_FLOW.md "$DEST/docs/"
 rm -rf "$DEST/dev" "$DEST/firmware" "$DEST/deploy" "$DEST/door" "$DEST/camera" "$DEST/odour"
 cp -r "$SRC/dev" "$SRC/firmware" "$SRC/deploy" "$SRC/door" "$SRC/camera" "$SRC/odour" "$DEST"/
 find "$DEST" -name __pycache__ -prune -exec rm -rf {} +
@@ -112,7 +112,7 @@ Next:
   2. facility doctor      # everything should be ✓
   3. facility health
   4. sudo reboot          # once, to switch on the watchdog
-Docs on this Pi: facility docs install | setup | readme
+Docs on this Pi: facility docs install | setup | readme | api
 NEXT
 else
     systemctl start facility-node

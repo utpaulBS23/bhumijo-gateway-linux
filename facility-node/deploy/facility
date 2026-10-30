@@ -36,7 +36,7 @@ facility <command>
   sensor [cmd]      ESP32 air sensor board: facility sensor flash | upload |
                                enable | disable | test   (run without sudo)
   update            git pull the source checkout, reinstall, restart
-  docs [name]       read the docs: readme | install | setup  (default: install)
+  docs [name]       read the docs: readme | install | setup | api  (default: install)
   version           installed version
 USAGE
 }
@@ -58,7 +58,7 @@ case "$cmd" in
     sensor)  bash "$DIR/deploy/sensor-setup.sh" "$@" ;;   # sudo only inside, for .env
     docs)
         case "${1:-install}" in
-            readme)  f=README.md ;; setup) f=SETUP.md ;; *) f=INSTALL.md ;;
+            readme)  f=README.md ;; setup) f=SETUP.md ;; api) f=API_FLOW.md ;; *) f=INSTALL.md ;;
         esac
         less "$DIR/docs/$f" ;;
     update)
