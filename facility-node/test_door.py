@@ -3,6 +3,7 @@
 No hardware or network needed: relay, backend and clock are faked.
 """
 
+import json
 import os
 import tempfile
 import unittest
@@ -1245,7 +1246,7 @@ class QRValidatorTests(unittest.TestCase):
         method, url, data, headers, timeout = sess.calls[0]
         self.assertEqual((method, url), ("POST", "https://admin.test/api/qr/validate"))
         self.assertEqual(data, {"token": "TOKEN-123", "facility": "facility-001", "door": "male"})
-        self.assertEqual((headers, timeout), ({"X": "k"}, 3.0))
+        self.assertEqual((headers, timeout), ({"X": "k"}, 5.0))
 
     def test_request_shape_get_custom_fields(self):
         verdict, sess = self.check(FakeResp(200, {"data": {"access_granted": 1}}), env={
@@ -1348,6 +1349,80 @@ class QRApiDoorTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             qr_settings(env={"QR_API_METHOD": "PUT"})
         self.assertEqual(settings().qr_api_url, "", "off by default")
+
+
+JABO = {**TWO_DOORS, "QR_API_URL": "/qr/validate", "QR_API_ORDER": "api_only",
+        "QR_API_AUTH_HEADER": "Device-Auth-Code", "DEVICE_AUTH_CODE": "dev-code-1",
+        "QR_API_ALLOW_FIELD": "message", "QR_API_ALLOW_VALUES": "service unlocked",
+        "QR_API_REASON_FIELD": "message"}
+
+
+class DeviceAuthQRTests(unittest.TestCase):
+    """The Jabo Khotai backend: /qr/validate with the facility's Device-Auth-Code;
+    the backend runs /user/accesses and answers 200 "Service unlocked" to open."""
+
+    def validator(self, resp, env=None):
+        from door.qr_api import QRValidator, qr_auth_headers
+        s = settings({**JABO, **(env or {})})
+        sess = StubQRSession(lambda d: resp() if callable(resp) else resp)
+        up = Uplink(s, Store(":memory:"), session=FakeSession())
+        return QRValidator(s, session=sess, auth_headers=qr_auth_headers(s, up)), sess
+
+    def test_request_shape(self):
+        v, sess = self.validator(FakeResp(200, {"message": "Service unlocked"}))
+        self.assertEqual(v.check_detail("BHU-1", "female", "scan-1"), ("allow", None))
+        method, url, data, headers, _ = sess.calls[0]
+        self.assertEqual((method, url), ("POST", "https://admin.test/api/qr/validate"))
+        self.assertEqual(data, {"token": "BHU-1", "facility": "facility-001", "door": "female",
+                                "scan_id": "scan-1"})
+        self.assertEqual(headers, {"Device-Auth-Code": "dev-code-1", "Idempotency-Key": "scan-1"},
+                         "the device code, never the admin key")
+        self.assertEqual(v.state()["auth_header"], "Device-Auth-Code")
+
+    def test_opens_only_on_service_unlocked(self):
+        for resp, want in [(FakeResp(200, {"message": "Service unlocked"}), "allow"),
+                           (FakeResp(200, {"message": "SERVICE UNLOCKED "}), "allow"),
+                           (FakeResp(200, {"message": "Invalid token"}), "deny"),
+                           (FakeResp(200, {}), "deny"),
+                           (FakeResp(200, None), "unavailable")]:
+            self.assertEqual(self.validator(resp)[0].check("BHU-1", "male"), want, resp._json)
+
+    def test_refusal_carries_backend_message(self):
+        v, _ = self.validator(FakeResp(402, {"message": "insufficient_balance"}))
+        self.assertEqual(v.check_detail("BHU-1", "male"), ("deny", "insufficient_balance"))
+
+    def test_401_is_our_code_not_theirs(self):
+        v, _ = self.validator(FakeResp(401, {"message": "Unauthenticated."}))
+        with self.assertLogs("qr_api", "WARNING"):
+            self.assertEqual(v.check("BHU-1", "male"), "unavailable")
+        self.assertIn("DEVICE_AUTH_CODE", v.last_error)
+
+    def test_config(self):
+        self.assertEqual(settings(JABO).device_auth_code, "dev-code-1")
+        with self.assertRaises(ConfigError):
+            settings({**JABO, "DEVICE_AUTH_CODE": ""})
+        with self.assertRaises(ConfigError):
+            settings({**JABO, "DEVICE_AUTH_CODE": "CHANGE_ME"})
+        settings({**JABO, "DEVICE_AUTH_CODE": "", "ENABLE_DOORS": "0"})   # doors off: not needed
+
+    def test_door_opens_only_on_backend_grant(self):
+        from door.qr_api import QRValidator
+        s = settings(JABO)
+        replies = iter([FakeResp(200, {"message": "Service unlocked"}),
+                        FakeResp(402, {"message": "insufficient_balance"}), "down"])
+
+        def reply(data):
+            r = next(replies)
+            if r == "down":
+                raise requests.ConnectionError("down")
+            return r
+        relay, up = FakeRelay(), FakeUplink()
+        male = DoorController(s, s.doors[0], Store(":memory:"), relay, up,
+                              spawn=lambda fn: fn(), qr_api=QRValidator(s, session=StubQRSession(reply)))
+        self.assertEqual(male.qr_detail("BHU-1"), ("opened", None))
+        self.assertEqual(male.qr_detail("BHU-2"), ("denied", "insufficient_balance"))
+        self.assertEqual(male.qr_detail("BHU-3"), ("denied", "offline"))
+        self.assertEqual(relay.fired, [1])
 
 
 class PaidEntryTests(unittest.TestCase):
@@ -1590,6 +1665,25 @@ class DummyBackendTests(unittest.TestCase):
         links = CameraLinks(s, [Camera(s, c) for c in s.cameras], store, up)
         self.assertEqual(links.state(),
                          {"source": "admin", "doors": {"male": "entry", "female": "entry"}})
+
+    def test_jabo_validate_against_dummy(self):
+        """/qr/validate the Jabo Khotai way: Device-Auth-Code, "Service unlocked"."""
+        from door.qr_api import QRValidator, qr_auth_headers
+        self.app = __import__("dummy_backend").create_app(
+            data_dir=self.tmp.name, quiet=True, balance=1, jabo=True)
+        self.c = self.app.test_client()
+        s = settings({**JABO, "ADMIN_URL": "http://127.0.0.1:8091/api", "ADMIN_KEY": "dummy-key",
+                      "DEVICE_AUTH_CODE": "dummy-device-code"})
+        v = QRValidator(s, session=self.bridge(), auth_headers=qr_auth_headers(s, None))
+        self.assertEqual(v.check_detail("DUMMY-ALLOW-0001", "female", "scan-1"), ("allow", None))
+        self.assertEqual(v.check_detail("DUMMY-ALLOW-0001", "female", "scan-1"), ("allow", None),
+                         "same scan again: same answer, no new charge")
+        self.assertEqual(v.check_detail("DUMMY-ALLOW-0001", "female", "scan-2"),
+                         ("deny", "insufficient_balance"))
+        self.assertEqual(v.check_detail("NOT-A-CODE", "male", "scan-3"), ("deny", "unknown_code"))
+        wrong = QRValidator(s, session=self.bridge(), auth_headers={"Device-Auth-Code": "nope"})
+        self.assertEqual(wrong.check("DUMMY-ALLOW-0002", "male"), "unavailable")
+        self.assertIn("DEVICE_AUTH_CODE", wrong.last_error)
 
     def test_paid_entry_against_dummy(self):
         """Balance, one charge per scan_id, refund on relay_failed: the real

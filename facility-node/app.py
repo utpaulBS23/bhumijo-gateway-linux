@@ -315,7 +315,7 @@ def main():
     from config import Settings
     from door import DoorController
     from door.inputs import ReedSwitch, run_door_ticker, run_exit_poller
-    from door.qr_api import QRValidator
+    from door.qr_api import QRValidator, qr_auth_headers
     from door.relay import Relay
     from odour.monitor import OdourMonitor
     from odour.mq import MQSensors
@@ -343,7 +343,7 @@ def main():
     mq = MQSensors(s) if s.enable_odour and s.mq else None
     qr_api = None
     if s.enable_doors and s.qr_api_url:
-        qr_api = QRValidator(s, auth_headers=uplink.auth_headers() if s.qr_api_auth else {})
+        qr_api = QRValidator(s, auth_headers=qr_auth_headers(s, uplink))
         if any(h in s.qr_api_url for h in ("localhost", "127.0.0.1")):
             log.warning("QR_API_URL points at this machine (%s): dummy API? "
                         "Never leave this on in production", s.qr_api_url)

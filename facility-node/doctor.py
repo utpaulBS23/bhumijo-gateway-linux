@@ -79,6 +79,8 @@ def check_config(r, env_path):
                    "api_first": "backend first, local cache if it is down",
                    "local_first": "local cache first, backend for unknown codes"}
         r.line(OK, "QR entry", qr_mode[s.qr_api_order] if s.qr_api_url else "local cache only")
+        if s.qr_api_url and s.qr_api_auth_header:
+            r.line(OK, f"QR check sends {s.qr_api_auth_header}", "DEVICE_AUTH_CODE set")
     if s.door_test_endpoints:
         r.line(WARN, "DOOR_TEST_ENDPOINTS=1", "turn off before handover")
     if any(h in s.qr_api_url for h in ("127.0.0.1", "localhost")):
@@ -211,13 +213,14 @@ def check_backend(r, s):
 
 
 def check_qr_api(r, s):
-    from door.qr_api import QRValidator
+    from door.qr_api import QRValidator, qr_auth_headers
     from uplink import Uplink
-    up = Uplink(s, store=None)
-    v = QRValidator(s, auth_headers=up.auth_headers() if s.qr_api_auth else {})
-    verdict = v.check("DOCTOR-PROBE-NOT-A-REAL-CODE", None)
+    v = QRValidator(s, auth_headers=qr_auth_headers(s, Uplink(s, store=None)))
+    verdict = v.check("DOCTOR-PROBE-NOT-A-REAL-CODE", s.doors[0].name if s.doors else None)
     if verdict == "unavailable":
         r.line(FAIL, f"QR API {s.qr_api_url}", v.last_error)
+    elif verdict == "allow":
+        r.line(WARN, "QR API allowed a fake code", "check QR_API_ALLOW_FIELD / the backend")
     else:
         r.line(OK, f"QR API answers ({verdict} for a fake code)")
 

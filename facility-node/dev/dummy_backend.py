@@ -12,6 +12,13 @@ Point the node at it (.env), then restart:
     ADMIN_KEY=dummy-key
     QR_API_URL=/qr/validate        # optional: online QR validation too
 
+Or like the Jabo Khotai backend (start with --jabo):
+
+    QR_API_URL=/qr/validate   QR_API_ORDER=api_only
+    QR_API_AUTH_HEADER=Device-Auth-Code   DEVICE_AUTH_CODE=dummy-device-code
+    QR_API_ALLOW_FIELD=message   QR_API_ALLOW_VALUES=service unlocked
+    QR_API_REASON_FIELD=message
+
 Open http://127.0.0.1:8091/ for a live dashboard of what the Pi sent.
 
 Implements the contract in README.md section 8, with the default paths:
@@ -21,7 +28,9 @@ Implements the contract in README.md section 8, with the default paths:
     POST /api/facility/door-event             access log
     POST /api/facility/alert                  anomalies
     POST /api/facility/snapshot               multipart JPEG upload
-    POST /api/qr/validate                     online QR check + charge (paid entry)
+    POST /api/qr/validate                     online QR check + charge (paid entry); --jabo:
+                                              Device-Auth-Code header, 200 {"message":
+                                              "Service unlocked"} or 4xx {"message": reason}
 
 Behaves like a well-built backend: checks the auth header, rejects payloads
 missing required fields (422), ignores repeated event ids (returns 200 with
@@ -96,7 +105,8 @@ class State:
 
 def create_app(key="dummy-key", tokens=DEFAULT_TOKENS, auth_code="dummy-auth-code",
                data_dir=os.path.join(HERE, "backend-data"), outage=False, quiet=False,
-               balance=3, camera_doors=None):
+               balance=3, camera_doors=None, jabo=False,
+               device_auth_code="dummy-device-code"):
     app = Flask("dummy_backend")
     st = State(tokens, auth_code, data_dir, balance)
     st.outage = outage
@@ -112,6 +122,11 @@ def create_app(key="dummy-key", tokens=DEFAULT_TOKENS, auth_code="dummy-auth-cod
             return None
         if st.outage:
             return jsonify(error="simulated outage"), 503
+        if jabo and request.path == "/api/qr/validate":
+            if request.headers.get("Device-Auth-Code") != device_auth_code:
+                say("401 /api/qr/validate: bad or missing Device-Auth-Code header")
+                return jsonify(message="Unauthenticated."), 401
+            return None
         if key and request.headers.get("Authorization") != f"Bearer {key}":
             say(f"401 {request.method} {request.path}: bad or missing Authorization header")
             return jsonify(error="unauthorized"), 401
@@ -178,11 +193,8 @@ def create_app(key="dummy-key", tokens=DEFAULT_TOKENS, auth_code="dummy-auth-cod
             body["cameraDoors"] = camera_doors
         return jsonify(body)
 
-    @app.route("/api/qr/validate", methods=["GET", "POST"])
-    def qr_validate():
-        data = {**request.args.to_dict(), **(request.get_json(silent=True) or {})}
-        token = data.get("token")
-        scan_id = data.get("scan_id") or request.headers.get("Idempotency-Key")
+    def charge(token, scan_id):
+        """One charge per scan_id -> (ok, reason, note)."""
         with st.lock:
             if scan_id and scan_id in st.charges:      # same scan asked again
                 _, ok, reason = st.charges[scan_id]
@@ -196,8 +208,20 @@ def create_app(key="dummy-key", tokens=DEFAULT_TOKENS, auth_code="dummy-auth-cod
                 ok, reason, note = True, None, f"charged, {st.balance[token]} left"
             if scan_id and scan_id not in st.charges:
                 st.charges[scan_id] = (token, ok, reason)
+        return ok, reason, note
+
+    @app.route("/api/qr/validate", methods=["GET", "POST"])
+    def qr_validate():
+        data = {**request.args.to_dict(), **(request.get_json(silent=True) or {})}
+        token = data.get("token")
+        scan_id = data.get("scan_id") or request.headers.get("Idempotency-Key")
+        ok, reason, note = charge(token, scan_id)
         say(f"QR validate {token!r} door={data.get('door')} scan={scan_id} -> "
             f"{'ALLOW' if ok else 'DENY ' + str(reason)} {note}")
+        if jabo:   # the backend ran /user/accesses for this door's service
+            if ok:
+                return jsonify(message="Service unlocked"), 200
+            return jsonify(message=reason), 402 if reason == "insufficient_balance" else 403
         if reason == "insufficient_balance":
             return jsonify(allowed=False, reason=reason), 402
         return jsonify(allowed=ok, reason=reason)
@@ -287,6 +311,10 @@ def main():
     p.add_argument("--balance", type=int, default=3, help="paid entries per code")
     p.add_argument("--camera-doors", type=json.loads, default=None,
                    help='admin panel camera links, e.g. \'{"entry": ["male", "female"]}\'')
+    p.add_argument("--jabo", action="store_true",
+                   help="/api/qr/validate answers like the Jabo Khotai backend")
+    p.add_argument("--device-auth-code", default="dummy-device-code",
+                   help="expected Device-Auth-Code on /api/qr/validate with --jabo")
     args = p.parse_args()
     tokens = args.token or DEFAULT_TOKENS
     print(f"Dummy backend on http://{args.host}:{args.port}  (dashboard at /)\n"
@@ -294,7 +322,8 @@ def main():
           f"  tokens: {', '.join(tokens)}   authCode: {args.auth_code}\n"
           f"  data: {args.data}")
     create_app(args.key, tokens, args.auth_code, args.data, args.outage,
-               balance=args.balance, camera_doors=args.camera_doors).run(
+               balance=args.balance, camera_doors=args.camera_doors,
+               jabo=args.jabo, device_auth_code=args.device_auth_code).run(
         host=args.host, port=args.port, threaded=True)
 
 

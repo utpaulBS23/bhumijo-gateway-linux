@@ -9,6 +9,7 @@ whatever the backend exposes:
     QR_API_FACILITY_FIELD=facility       # empty = don't send
     QR_API_DOOR_FIELD=door               # empty = don't send
     QR_API_EXTRA={"device":"pi-01"}      # extra static fields (JSON)
+    QR_API_AUTH_HEADER=Device-Auth-Code  # send DEVICE_AUTH_CODE in it, not the admin key
     QR_API_ALLOW_FIELD=allowed           # dot path in the JSON reply, e.g. data.access_granted
     QR_API_ALLOW_VALUES=true,1,yes,granted,allow,allowed,success
     QR_API_DENY_STATUS=400,402,403,404,410,422
@@ -18,7 +19,8 @@ whatever the backend exposes:
 Result of a check:
     "allow"        2xx and the allow field holds an allow value
     "deny"         2xx with any other value, or a QR_API_DENY_STATUS code
-    "unavailable"  timeout, network error, 5xx, 401, or an unreadable reply
+    "unavailable"  timeout, network error, 5xx, 401 (our credentials, not the
+                   person's code), or an unreadable reply
                    -> local_first / api_first: the local token cache decides
                    -> api_only: refused (no internet = no QR entry)
 
@@ -26,6 +28,11 @@ Paid entry (the backend charges per scan): every call carries a scan_id, in
 the body and as the Idempotency-Key header. If a reply is lost and the same
 scan is asked again, the backend must answer the first result and not charge
 twice.
+
+Jabo Khotai backend: /qr/validate takes the default fields, looks up the
+door's service id and gender itself and runs /user/accesses. It answers 200
+{"message": "Service unlocked"} to open (QR_API_ALLOW_FIELD=message,
+QR_API_ALLOW_VALUES=service unlocked), or a 4xx with the reason in "message".
 """
 
 import logging
@@ -54,6 +61,14 @@ def is_allow(value, allow_values):
     if value is None:
         return False
     return str(value).strip().lower() in allow_values
+
+
+def qr_auth_headers(settings, uplink):
+    """Headers for the QR call: the Device Auth Code in QR_API_AUTH_HEADER, else
+    the admin auth header (QR_API_AUTH=1), else none."""
+    if settings.qr_api_auth_header:
+        return {settings.qr_api_auth_header: settings.device_auth_code}
+    return uplink.auth_headers() if settings.qr_api_auth and uplink else {}
 
 
 class QRValidator:
@@ -106,6 +121,10 @@ class QRValidator:
         if code in self.s.qr_api_deny_status:
             self.last_ok = time.time()
             return "deny", reason or f"HTTP {code}"
+        if code == 401:
+            # The backend refused this Pi, not the person's code
+            fix = "DEVICE_AUTH_CODE" if self.s.qr_api_auth_header else "ADMIN_KEY"
+            return self._unavailable(f"HTTP 401, credentials refused: check {fix}")
         if not 200 <= code < 300:
             return self._unavailable(f"HTTP {code}")
         if body is None:
@@ -127,4 +146,6 @@ class QRValidator:
 
     def state(self):
         return {"order": self.s.qr_api_order, "method": self.s.qr_api_method,
+                "auth_header": self.s.qr_api_auth_header or (
+                    self.s.admin_auth_header if self.s.qr_api_auth else None),
                 "last_ok": self.last_ok, "last_error": self.last_error}

@@ -400,10 +400,30 @@ By default the Pi checks codes against the token list it pulls every 5 minutes. 
 ```ini
 QR_API_URL=/qr/validate          # the backend's check-and-charge API
 QR_API_ORDER=api_only
-QR_API_TIMEOUT=3
+QR_API_TIMEOUT=5
 ```
 
 Because paid entry now needs the internet, give the router a **backup connection (4G/LTE failover SIM)**, and watch `facility health` → `qr_api.last_ok` / `last_error`. The backend must charge each `scan_id` only once and refund on `relay_failed` (README section 8, "Paid entry").
+
+**Jabo Khotai backend (customer app QR).** The customer shows the QR from the Jabo Khotai app; the Pi sends it to the backend's `POST /api/qr/validate` with the facility's Device Auth Code. The backend finds the door's service id and gender, runs `/user/accesses`, and answers `200 {"message": "Service unlocked"}` to open:
+
+1. Get the facility's **Auth Code** from the admin panel (Device List). One code per facility, both doors use it.
+2. Each door's **service id** is set in the admin panel; the Pi doesn't need it (it sends `facility` and `door`).
+3. In `.env` (keep `KEY=value` lines, no comment after a value):
+
+```ini
+ADMIN_URL=https://stage-api.bhumijosmartmanagement.com/api
+QR_API_URL=/qr/validate
+QR_API_ORDER=api_only
+QR_API_AUTH_HEADER=Device-Auth-Code
+DEVICE_AUTH_CODE=<the facility's Auth Code>
+QR_API_ALLOW_FIELD=message
+QR_API_ALLOW_VALUES=service unlocked
+QR_API_REASON_FIELD=message
+```
+
+4. `sudo systemctl restart facility-node && facility doctor door`: expect "QR check sends Device-Auth-Code" and "QR API answers (deny for a fake code)". "credentials refused: check DEVICE_AUTH_CODE" = wrong Auth Code.
+5. Scan one real Jabo Khotai QR at each door, then a used or invalid one (the door stays shut; `facility logs` shows "QR denied (api_denied: <backend message>)").
 
 **Match your backend's API**
 
@@ -418,13 +438,16 @@ Because paid entry now needs the internet, give the router a **backup connection
 | Replies `{"status":"granted"}` | `QR_API_ALLOW_FIELD=status` (`granted` is already an allow value) |
 | Refuses with HTTP 403 | Already counted as "refused" (`QR_API_DENY_STATUS`) |
 | Has its own key, not the admin key | `QR_API_AUTH=0` and put the key in `QR_API_EXTRA` |
+| Wants a device code in a header, e.g. `Device-Auth-Code` | `QR_API_AUTH_HEADER=Device-Auth-Code` and `DEVICE_AUTH_CODE=<code>` |
+| Says yes with `{"message": "Service unlocked"}` | `QR_API_ALLOW_FIELD=message` and `QR_API_ALLOW_VALUES=service unlocked` |
+| Refuses with `{"message": "…"}` | `QR_API_REASON_FIELD=message` |
 | Refuses with HTTP 402 and `{"reason": "insufficient_balance"}` | Already handled (402 is a refusal; `QR_API_REASON_FIELD=reason`) |
 | Calls the scan id `request_id` | `QR_API_SCAN_ID_FIELD=request_id` (it is always sent as `Idempotency-Key` too) |
 
 **Pick the order**
 
 - **`QR_API_ORDER=local_first`** (recommended): codes in the cache open instantly, and only unknown codes go to the API. With the internet down, every cached code still opens.
-- **`QR_API_ORDER=api_first`:** every scan asks the API first, and a "no" from the API beats the cache, so revocation takes effect immediately. If the API doesn't answer within `QR_API_TIMEOUT` (3 s), the cache decides. Each scan can wait up to that long.
+- **`QR_API_ORDER=api_first`:** every scan asks the API first, and a "no" from the API beats the cache, so revocation takes effect immediately. If the API doesn't answer within `QR_API_TIMEOUT` (5 s), the cache decides. Each scan can wait up to that long.
 - **`QR_API_ORDER=api_only`:** paid entry, as above. The API decides every scan, and without it no QR opens.
 
 Codes made with `facility qr` always open locally, in both modes.

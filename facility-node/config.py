@@ -111,6 +111,14 @@ def _qr_api_order(admin_url):
     return order
 
 
+def _device_auth_code(admin_url):
+    """The facility's Device Auth Code, sent as QR_API_AUTH_HEADER on every QR
+    check. Required once that header is set: without it no QR could open."""
+    if not (_env("QR_API_AUTH_HEADER") and _qr_api_url(admin_url) and enabled("doors")):
+        return _env("DEVICE_AUTH_CODE", "")
+    return _required("DEVICE_AUTH_CODE")
+
+
 def _qr_api_extra():
     raw = _env("QR_API_EXTRA", "")
     if not raw:
@@ -323,7 +331,9 @@ class Settings:
     qr_api_method: str
     qr_api_order: str          # local_first | api_first | api_only (paid: online + balance)
     qr_api_timeout: float
-    qr_api_auth: bool          # send the admin auth header
+    qr_api_auth: bool          # send the admin auth header (when qr_api_auth_header is "")
+    qr_api_auth_header: str    # e.g. "Device-Auth-Code": send device_auth_code instead
+    device_auth_code: str      # the facility's Device Auth Code (secret)
     qr_api_token_field: str
     qr_api_facility_field: str
     qr_api_door_field: str
@@ -423,8 +433,10 @@ class Settings:
             qr_api_url=_qr_api_url(admin_url),
             qr_api_method=_choice("QR_API_METHOD", "POST", ["POST", "GET"]).upper(),
             qr_api_order=_qr_api_order(admin_url),
-            qr_api_timeout=_float("QR_API_TIMEOUT", 3.0),
+            qr_api_timeout=_float("QR_API_TIMEOUT", 5.0),
             qr_api_auth=_bool("QR_API_AUTH", True),
+            qr_api_auth_header=_env("QR_API_AUTH_HEADER", ""),
+            device_auth_code=_device_auth_code(admin_url),
             qr_api_token_field=_env("QR_API_TOKEN_FIELD", "token"),
             qr_api_facility_field=os.environ.get("QR_API_FACILITY_FIELD", "facility").strip(),
             qr_api_door_field=os.environ.get("QR_API_DOOR_FIELD", "door").strip(),

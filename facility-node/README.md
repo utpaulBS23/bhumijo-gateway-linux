@@ -230,6 +230,7 @@ All settings live in `/opt/facility-node/.env`, loaded by systemd. **`.env.examp
 | 1 Door | Unlock time | `UNLOCK_SECONDS` (all doors), `DOOR_<NAME>_UNLOCK_SECONDS` | 1–30 s, default 5; `facility door delay male 8` |
 | 1 Door | Reed | `REED`, `REED_ACTIVE_HIGH`, `PROPPED_THRESHOLD`, `PROPPED_REPEAT`, `CLASSIFY_WINDOW` | |
 | 1 Door | QR validation | `QR_API_URL`, `_METHOD`, `_ORDER`, `_TIMEOUT`, `_AUTH`, `_TOKEN_FIELD`, `_FACILITY_FIELD`, `_DOOR_FIELD`, `_EXTRA`, `_ALLOW_FIELD`, `_ALLOW_VALUES`, `_DENY_STATUS`, `_SCAN_ID_FIELD`, `_REASON_FIELD`, `QR_DEDUP_SECONDS` | off when `QR_API_URL` is empty; `QR_API_ORDER=api_only` = paid entry |
+| 1 Door | QR device auth | `QR_API_AUTH_HEADER`, `DEVICE_AUTH_CODE` | e.g. `Device-Auth-Code`: the QR check sends the facility's Device Auth Code (secret, required once the header is set) instead of the admin key |
 | 1 Door | Attendant purposes | `ATTENDANT_PURPOSES` | what personal use may be for; default `cleaning,bath,toilet,maintenance` |
 | 1 Door | Scanner messages | `SCANNER_MSG_OPENED`, `_NO_BALANCE`, `_OFFLINE`, `_DENIED`, `_ERROR` | what the scanner shows; English defaults |
 | 1 Door | Bench test | `DOOR_TEST_ENDPOINTS` | keep `0` in production |
@@ -347,7 +348,9 @@ Default request: `POST {"token": "…", "facility": "…", "door": "male", "scan
 
 `dev/dummy_backend.py` does all of this (`--balance N`), for testing.
 
-The method, field names, extra fields, reply field, allow values and deny status codes are all configurable (`QR_API_*`). A timeout, network error, 5xx or 401 means "unavailable", and the cache decides. **[SETUP.md](SETUP.md) section 4.6** shows how to match an existing backend.
+The method, field names, extra fields, reply field, allow values and deny status codes are all configurable (`QR_API_*`). A timeout, network error, 5xx or 401 means "unavailable", and the cache decides (401 is logged as "credentials refused": the Pi's key or Device Auth Code, not the person's code).
+
+**Jabo Khotai backend** (the customer app shows the QR): the Pi sends the default request to `POST {ADMIN_URL}/qr/validate` with header `Device-Auth-Code: <facility's code>` instead of the admin key. The backend finds the door's `service_id` and `gender` from `facility` + `door`, runs its `/user/accesses` logic with the `token` (charging each `scan_id` once), and answers `200 {"message": "Service unlocked"}` to open. Anything else keeps the door shut: a refusal is a 4xx (`402` no balance, `403` invalid / used code…) with the reason in `message`, which the Pi logs as `api_reason`. Settings: the Jabo Khotai block in `.env.example`, or SETUP.md section 4.6. `dev/dummy_backend.py --jabo` answers the same way, for testing. **[SETUP.md](SETUP.md) section 4.6** shows how to match an existing backend.
 
 ### Optional: snapshot upload (`SNAPSHOT_UPLOAD_PATH`)
 
@@ -381,7 +384,7 @@ Every event (entry, refusal, attendant open, alert, reading) is written to the q
 |---|---|
 | Internet / backend down | Facility app, staff codes and exit buttons open; QR opens from the cache, or is refused with paid entry; events queue in SQLite on the SD card |
 | Backend back | Queue drains oldest-first; nothing lost |
-| QR API down | `local_first` / `api_first`: falls back to the cache within `QR_API_TIMEOUT` (3 s). `api_only` (paid entry): **QR refused** (`reason: offline`); Pi-made staff codes, the Facility app and the exit buttons still open |
+| QR API down | `local_first` / `api_first`: falls back to the cache within `QR_API_TIMEOUT` (5 s). `api_only` (paid entry): **QR refused** (`reason: offline`); Pi-made staff codes, the Facility app and the exit buttons still open |
 | Relay board down | Unlock returns `502`, nothing is logged as entry; exit buttons still work in hardware |
 | Pi off or crashed | Exit buttons and locks work in hardware; the watchdog reboots a hung Pi; the service auto-restarts |
 | Power cut | Locks fail open (safe); the UPS keeps the Pi, router and camera up; SQLite WAL survives hard cuts |
