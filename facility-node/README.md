@@ -420,7 +420,7 @@ Runs on any machine with Python 3.9+. No Pi or hardware is needed for the tests.
 
 ```bash
 cd facility-node
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+python3 -m venv .venv && .venv/bin/pip install -e .
 .venv/bin/python test_door.py            # 153 tests
 ```
 
@@ -461,7 +461,8 @@ facility-node/
 │   ├── monitor.py      TVOC 0-100 score, odour alert state machine
 │   └── mq.py           ADS1115 + MQ-135/MQ-136; calibrate / read CLI (facility mq)
 ├── test_door.py        Test suite
-├── requirements.txt    flask, requests, smbus2, qrcode, pypng
+├── pyproject.toml      Dependencies (flask, requests, smbus2, qrcode, pypng); install.sh uses it
+├── requirements.txt    Same list, kept for plain `pip install -r`
 ├── .env.example        Every setting, documented
 ├── deploy/
 │   ├── install.sh      Installer / updater

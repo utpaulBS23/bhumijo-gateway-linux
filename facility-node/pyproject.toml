@@ -14,3 +14,8 @@ dependencies = [
     "qrcode==7.4.2",
     "pypng==0.20220715.0",
 ]
+
+[tool.setuptools]
+# Runs from its folder (app.py), not as an installed package: install only the dependencies
+py-modules = []
+packages = []
