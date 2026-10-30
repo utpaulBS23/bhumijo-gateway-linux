@@ -6,6 +6,12 @@
 #   facility camera show       saved camera settings, password hidden
 #   facility camera find       look for cameras on the LAN (RTSP port + Dahua/Imou discovery)
 #
+# Several cameras (CAMERAS=entry,male,female in .env): add the camera's name,
+#   facility camera setup male   saves CAM_MALE_HOST / _PORT / _RTSP, adds it to CAMERAS
+#   facility camera test male    facility camera show   (shows every camera)
+# A door's alert snapshot comes from the camera responsible for it: the admin
+# panel's choice, else CAM_<NAME>_DOORS, else the camera with the door's name.
+#
 # The stream is tested BEFORE anything is saved. Dahua/Imou cameras lock the
 # login for ~30 min after ~5 wrong passwords, and the service retries the saved
 # URL every CAM_FRAME_INTERVAL, so a wrong password must never reach .env.
@@ -22,6 +28,20 @@ LAN_PREFIX=192.168.10
 
 hide() { sed -E 's#rtsp://[^ ]*@#rtsp://***:***@#g'; }
 env_get() { grep -m1 -E "^$1=" "$ENV" | cut -d= -f2- || true; }
+
+# Which camera: a name (CAM_<NAME>_*) or the single camera (CAM_*).
+NAME=$(echo "${2:-}" | tr '[:upper:]' '[:lower:]')
+CAMERAS=$(env_get CAMERAS | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+if [ -n "$NAME" ]; then
+    [[ "$NAME" =~ ^[a-z0-9_]+$ ]] || { echo "bad camera name '$NAME' (letters, digits, _)"; exit 1; }
+    P="CAM_${NAME^^}_"
+elif [ -n "$CAMERAS" ] && [ "${1:-setup}" != show ] && [ "${1:-setup}" != find ]; then
+    echo "This site has several cameras ($CAMERAS): name one, e.g. facility camera ${1:-setup} ${CAMERAS%%,*}"
+    exit 1
+else
+    P="CAM_"
+fi
+LABEL=${NAME:-camera}
 
 # Stream paths by brand: main stream | sub stream
 PRESETS=(
@@ -78,14 +98,21 @@ probe() {
 
 save() {   # host port url
     cp -p "$ENV" "$ENV.bak-camera"
-    ENVFILE="$ENV" H="$1" PORT="$2" URL="$3" python3 - <<'PY'
+    ENVFILE="$ENV" P="$P" NAME="$NAME" H="$1" PORT="$2" URL="$3" python3 - <<'PY'
 import os, re
 path = os.environ["ENVFILE"]
-want = {"CAM_HOST": os.environ["H"], "CAM_PORT": os.environ["PORT"], "CAM_RTSP": os.environ["URL"]}
+p, name = os.environ["P"], os.environ["NAME"]
+want = {p + "HOST": os.environ["H"], p + "PORT": os.environ["PORT"], p + "RTSP": os.environ["URL"]}
 lines = open(path).read().splitlines()
 # CAM_PORT defaults to 554; only write it when needed
-if want["CAM_PORT"] == "554" and not any(l.startswith("CAM_PORT=") for l in lines):
-    del want["CAM_PORT"]
+if want[p + "PORT"] == "554" and not any(l.startswith(p + "PORT=") for l in lines):
+    del want[p + "PORT"]
+# A named camera must be listed in CAMERAS to be used
+if name:
+    cams = next((l.split("=", 1)[1] for l in lines if l.startswith("CAMERAS=")), "")
+    names = [n.strip().lower() for n in cams.split(",") if n.strip()]
+    if name not in names:
+        want["CAMERAS"] = ",".join(names + [name])
 for key, val in want.items():
     for i, line in enumerate(lines):
         if re.match(rf"^{key}=", line):
@@ -97,7 +124,11 @@ open(path, "w").write("\n".join(lines) + "\n")
 PY
     chown root:facility "$ENV" "$ENV.bak-camera"
     chmod 640 "$ENV" "$ENV.bak-camera"
-    echo "Saved camera settings (previous .env kept as $ENV.bak-camera)"
+    echo "Saved $LABEL settings (previous .env kept as $ENV.bak-camera)"
+    if [ -n "$NAME" ] && [ -z "$CAMERAS" ] && [ -n "$(env_get CAM_HOST)" ]; then
+        echo "  Note: CAMERAS is now set, so the single camera (CAM_HOST / CAM_RTSP) is no"
+        echo "  longer used. Add it under a name too: facility camera setup <name>"
+    fi
 }
 
 # After a restart the service checks the camera at once; wait for that result.
@@ -106,9 +137,11 @@ wait_health() {
     echo "Waiting for the service's camera check (up to 60 s)..."
     for _ in $(seq 12); do
         sleep 5
-        st=$(curl -s -m4 "http://127.0.0.1:$port/health" | python3 -c '
-import sys, json
-c = json.load(sys.stdin).get("camera", {})
+        st=$(curl -s -m4 "http://127.0.0.1:$port/health" | NAME="$NAME" python3 -c '
+import os, sys, json
+h = json.load(sys.stdin)
+c = (h.get("cameras") or {}).get(os.environ["NAME"]) if os.environ["NAME"] else h.get("camera")
+c = c or {}
 print(c.get("reachable"), c.get("streaming"), c.get("frozen"))' 2>/dev/null) || continue
         read -r reach stream frozen <<<"$st"
         if [ "$stream" != "None" ]; then
@@ -119,18 +152,32 @@ print(c.get("reachable"), c.get("streaming"), c.get("frozen"))' 2>/dev/null) || 
     echo "  no result yet - check later with: facility health"
 }
 
+show_one() {   # prefix
+    echo "${1}HOST=$(env_get "${1}HOST")"
+    echo "${1}PORT=$(env_get "${1}PORT")"
+    echo "${1}RTSP=$(env_get "${1}RTSP" | hide)"
+}
+
 cmd_show() {
-    local url; url=$(env_get CAM_RTSP)
-    echo "CAM_HOST=$(env_get CAM_HOST)"
-    echo "CAM_PORT=$(env_get CAM_PORT)"
-    echo "CAM_RTSP=$(echo "$url" | hide)"
+    if [ -n "$NAME" ]; then
+        show_one "$P"
+    elif [ -n "$CAMERAS" ]; then
+        echo "CAMERAS=$CAMERAS"
+        echo "CAM_MONITOR=$(env_get CAM_MONITOR)"
+        for n in ${CAMERAS//,/ }; do echo; show_one "CAM_${n^^}_"; done
+        echo
+        grep -E '^CAM_[A-Z0-9_]+_DOORS=' "$ENV" || echo "(no CAM_*_DOORS: each door uses the camera with its name)"
+        echo "The admin panel's links win when the backend sends them: facility health -> camera_links"
+    else
+        show_one CAM_
+    fi
     [ -f "$ENV.bak-camera" ] && echo "backup:  $ENV.bak-camera ($(date -r "$ENV.bak-camera" '+%F %H:%M'))"
     return 0
 }
 
 cmd_test() {
-    local url; url=$(env_get CAM_RTSP)
-    [ -n "$url" ] || { echo "CAM_RTSP is empty: run  facility camera"; exit 1; }
+    local url; url=$(env_get "${P}RTSP")
+    [ -n "$url" ] || { echo "${P}RTSP is empty: run  facility camera setup $NAME"; exit 1; }
     echo "Testing $(echo "$url" | hide)"
     probe "$url"
 }
@@ -182,12 +229,12 @@ PY
 
 cmd_setup() {
     local cur user host port path pass url choice sub
-    cur=$(env_get CAM_RTSP)
+    cur=$(env_get "${P}RTSP")
     IFS=$'\t' read -r user host port path < <(url_parts "${cur:-rtsp://admin@x/}") || true
-    host=$(env_get CAM_HOST); [ -n "$host" ] || host="$LAN_PREFIX.149"
-    port=$(env_get CAM_PORT); port=${port:-554}
+    host=$(env_get "${P}HOST"); [ -n "$host" ] || host="$LAN_PREFIX.149"
+    port=$(env_get "${P}PORT"); port=${port:-554}
     [ -n "$user" ] || user=admin
-    echo "Camera setup. Press Enter to keep the value in [brackets]."
+    echo "Camera setup${NAME:+ for '$NAME'}. Press Enter to keep the value in [brackets]."
     echo "Current: $(echo "${cur:-not set}" | hide)"
     echo
 
@@ -234,5 +281,5 @@ case "${1:-setup}" in
     test)  cmd_test ;;
     show)  cmd_show ;;
     find)  cmd_find ;;
-    *) echo "usage: facility camera [setup|test|show|find]"; exit 1 ;;
+    *) echo "usage: facility camera [setup|test|show|find] [camera name]"; exit 1 ;;
 esac

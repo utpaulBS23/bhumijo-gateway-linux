@@ -146,19 +146,48 @@ def check_relay(r, s):
 
 def check_camera(r, s):
     r.section("Camera")
-    if not s.cam_host:
-        r.line(WARN, "CAM_HOST not set", "no camera health or snapshots")
+    if not s.cameras:
+        r.line(WARN, "no camera set (CAM_HOST / CAMERAS)", "no camera health or snapshots")
         return
-    if tcp_open(s.cam_host, s.cam_port):
-        r.line(OK, f"{s.cam_host}:{s.cam_port} reachable")
-    else:
-        r.line(FAIL, f"{s.cam_host}:{s.cam_port} not reachable")
     if shutil.which("ffmpeg"):
         r.line(OK, "ffmpeg installed")
     else:
         r.line(FAIL, "ffmpeg missing", "re-run deploy/install.sh")
-    if not s.cam_rtsp:
-        r.line(WARN, "CAM_RTSP not set", "no frozen-feed check or snapshots")
+    if not s.cam_monitor:
+        r.line(WARN, "health checks off (CAM_MONITOR=0)", "alert snapshots still taken")
+    door_cams, source = _camera_links(s)
+    if source == "admin":
+        r.line(OK, "door cameras set in the admin panel", "CAM_*_DOORS in .env not used")
+    for c in s.cameras:
+        doors = ", ".join(d for d, cam in door_cams.items() if cam == c.name)
+        where = f"pictures door {doors}" if doors else "no door uses it"
+        if not c.host:
+            r.line(WARN, f"camera {c.name}: no host set", "no reachability check")
+        elif tcp_open(c.host, c.port):
+            r.line(OK, f"camera {c.name}: {c.host}:{c.port} reachable", where)
+        else:
+            r.line(FAIL, f"camera {c.name}: {c.host}:{c.port} not reachable", where)
+        if not c.rtsp:
+            r.line(WARN, f"camera {c.name}: no RTSP URL", "no frozen-feed check or snapshots")
+    for door, cam in door_cams.items():
+        if cam is None:
+            r.line(WARN, f"door {door}: no camera", "its alerts go out without a picture: "
+                   + ("link it in the admin panel" if source == "admin"
+                      else "add it to a camera's CAM_<NAME>_DOORS"))
+
+
+def _camera_links(s):
+    """The links the service uses: admin panel ones from the database, else .env."""
+    from camera.camera import Camera, CameraLinks
+    st = None
+    if os.path.exists(s.db_path):
+        from store import Store
+        st = Store(s.db_path)
+    try:
+        return CameraLinks(s, [Camera(s, c) for c in s.cameras], st, uplink=None).links()
+    finally:
+        if st is not None:
+            st.close()
 
 
 def check_backend(r, s):

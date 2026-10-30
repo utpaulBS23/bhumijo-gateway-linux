@@ -16,7 +16,7 @@ Open http://127.0.0.1:8091/ for a live dashboard of what the Pi sent.
 
 Implements the contract in README.md section 8, with the default paths:
 
-    GET  /api/facility/tokens?facility=<id>   tokens + authCode
+    GET  /api/facility/tokens?facility=<id>   tokens + authCode (+ cameraDoors: --camera-doors)
     POST /api/facility/sensor                 sensor readings
     POST /api/facility/door-event             access log
     POST /api/facility/alert                  anomalies
@@ -96,7 +96,7 @@ class State:
 
 def create_app(key="dummy-key", tokens=DEFAULT_TOKENS, auth_code="dummy-auth-code",
                data_dir=os.path.join(HERE, "backend-data"), outage=False, quiet=False,
-               balance=3):
+               balance=3, camera_doors=None):
     app = Flask("dummy_backend")
     st = State(tokens, auth_code, data_dir, balance)
     st.outage = outage
@@ -163,7 +163,7 @@ def create_app(key="dummy-key", tokens=DEFAULT_TOKENS, auth_code="dummy-auth-cod
         if not st.record("snapshot", {**meta, "name": name}):
             return jsonify(ok=True, duplicate=True), 200
         f.save(os.path.join(st.data_dir, "snapshots", name))
-        say(f"NEW snapshot   {name}")
+        say(f"NEW snapshot   {name}" + (f"  camera {meta['camera']}" if meta.get("camera") else ""))
         return jsonify(ok=True, duplicate=False), 200
 
     @app.get("/api/facility/tokens")
@@ -172,8 +172,11 @@ def create_app(key="dummy-key", tokens=DEFAULT_TOKENS, auth_code="dummy-auth-cod
         if not facility:
             return jsonify(error="facility query parameter required"), 400
         say(f"pull tokens for {facility}: {len(st.tokens)} tokens")
-        return jsonify(facilityId=facility, authCode=st.auth_code,
-                       tokens=[{"token": t, "expiresAt": None} for t in st.tokens])
+        body = dict(facilityId=facility, authCode=st.auth_code,
+                    tokens=[{"token": t, "expiresAt": None} for t in st.tokens])
+        if camera_doors:   # the admin panel's camera -> doors links
+            body["cameraDoors"] = camera_doors
+        return jsonify(body)
 
     @app.route("/api/qr/validate", methods=["GET", "POST"])
     def qr_validate():
@@ -282,6 +285,8 @@ def main():
                    help="where events.jsonl and snapshots are written")
     p.add_argument("--outage", action="store_true", help="start returning 503")
     p.add_argument("--balance", type=int, default=3, help="paid entries per code")
+    p.add_argument("--camera-doors", type=json.loads, default=None,
+                   help='admin panel camera links, e.g. \'{"entry": ["male", "female"]}\'')
     args = p.parse_args()
     tokens = args.token or DEFAULT_TOKENS
     print(f"Dummy backend on http://{args.host}:{args.port}  (dashboard at /)\n"
@@ -289,7 +294,7 @@ def main():
           f"  tokens: {', '.join(tokens)}   authCode: {args.auth_code}\n"
           f"  data: {args.data}")
     create_app(args.key, tokens, args.auth_code, args.data, args.outage,
-               balance=args.balance).run(
+               balance=args.balance, camera_doors=args.camera_doors).run(
         host=args.host, port=args.port, threaded=True)
 
 

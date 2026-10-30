@@ -60,9 +60,9 @@ class DoorController:
                        "type": "anomaly", "subtype": subtype, "ts": iso(ts)}
             payload.update(extra)
             if with_snapshot:
-                ref = self.snapshot()
-                if ref:
-                    payload["snapshot"] = ref
+                shot = self.snapshot()   # {"snapshot", "camera"} from the door's camera
+                if shot:
+                    payload.update(shot)
             self.uplink.enqueue("alert", payload)
 
         self.spawn(send)
@@ -260,7 +260,8 @@ class DoorController:
             self._propped_alerts += 1
         log.warning("[%s] door open %d s: propped_open%s", self.name, elapsed,
                     " (repeat)" if repeat else "")
-        self._alert("propped_open", with_snapshot=not repeat,
+        # A picture every time: shows what happens while the door stays open
+        self._alert("propped_open", with_snapshot=True,
                     duration_s=int(elapsed), repeat=repeat)
 
     @property

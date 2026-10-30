@@ -9,6 +9,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
+from camera.camera import camera_fields
 from odour.monitor import add_tvoc_score
 
 log = logging.getLogger("sensors")
@@ -175,8 +176,8 @@ def make_sensors(settings):
     return Sensors()
 
 
-def run_sensor_loop(settings, sensors, camera, uplink, stop, mq=None, odour=None):
-    """The 1-minute "sensor" push. sensors=None (odour off) or camera=None
+def run_sensor_loop(settings, sensors, cameras, uplink, stop, mq=None, odour=None):
+    """The 1-minute "sensor" push. sensors=None (odour off) or no cameras
     (camera off) send nulls for that part, so the backend sees the same fields."""
     while not stop.is_set():
         reading = sensors.read() if sensors is not None else dict.fromkeys(HttpSensors.KEYS)
@@ -188,7 +189,8 @@ def run_sensor_loop(settings, sensors, camera, uplink, stop, mq=None, odour=None
         payload = {"facility": settings.facility_id,
                    "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                    **reading,
-                   # Camera health piggybacks the 1-minute push (plan section 6, note)
-                   "camera": camera.snapshot_status() if camera is not None else None}
+                   # Camera health piggybacks the 1-minute push (plan section 6, note):
+                   # every camera by name, and the first one as "camera" for older backends
+                   **camera_fields(cameras)}
         uplink.enqueue("sensor", payload)
         stop.wait(settings.sensor_interval)

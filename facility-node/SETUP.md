@@ -543,10 +543,12 @@ Then **revoke the test codes**: `facility qr revoke --label test`.
 
 ## 5. Camera monitoring
 
-**Devices:** IP camera (.149, RTSP port 554).
+**Devices:** IP camera (.149, RTSP port 554), or several cameras (section 5.5).
 **Code:** `camera/` · **Check:** `facility doctor camera`
 
-What the node watches: **reachable** (RTSP port answers, every 30 s), **streaming** and **frozen** (two frames 3 s apart differ, every 5 min). Both ride along with the 1-minute sensor push as `camera`. When doors are on, it also takes a **snapshot** on door alerts.
+What the node watches: **reachable** (RTSP port answers, every 30 s), **streaming** and **frozen** (two frames 3 s apart differ, every 5 min). Both ride along with the 1-minute sensor push as `camera` (and `cameras`, by name). When doors are on, it also takes a **snapshot** on door alerts, from that door's camera.
+
+**Health checks off, snapshots on:** set `CAM_MONITOR=0` (`facility config`). The node stops checking the cameras but still takes a picture when a door is forced or left open. `facility feature camera off` stops both.
 
 ### 5.1 Connect the camera
 
@@ -565,7 +567,7 @@ What the node watches: **reachable** (RTSP port answers, every 30 s), **streamin
 
 ### 5.2 Snapshots
 
-- **When:** on `forced_open` and on the first `propped_open` alert (door function).
+- **When:** on `forced_open`, and on **every** `propped_open` alert while the door stays open (after 300 s, then every 180 s), from the camera responsible for that door.
 - **Where:** saved to `/var/lib/facility/snapshots/` and deleted after `SNAPSHOT_KEEP_DAYS` (default 7).
 - **Upload:** set `SNAPSHOT_UPLOAD_PATH` in `.env` once the backend has an upload endpoint. The Pi sends a multipart POST with field `file` and form fields `facility`, `name`, `ts`, using the same auth header as the other APIs.
 - **Matching:** the upload is queued **before** its alert, so the image arrives first. The alert's `snapshot` field is the file name.
@@ -595,6 +597,33 @@ scp pi@192.168.10.104:/var/lib/facility/snapshots/*.jpg .
 | `401 Unauthorized` | Wrong user or password. Stop after 2–3 tries (the camera locks for ~30 min) |
 | `camera: null` in `/health` | `ENABLE_CAMERA=0`: `facility feature camera on` |
 | Snapshots not reaching admin | `SNAPSHOT_UPLOAD_PATH` empty, or the backend rejects the upload (look for `snapshot` in `journalctl`) |
+| Door alert has no picture | That door has no camera: `facility doctor camera` shows `door <name>: no camera`. Link it in the admin panel, or add it to a camera's `CAM_<NAME>_DOORS` |
+
+### 5.5 Several cameras: which camera covers which door
+
+Each door has **one** camera responsible for it. That camera takes the picture when the door is forced open, and every time the door is reported left open, until it closes. One camera can cover both doors, or each door can have its own.
+
+| Site | Set |
+|---|---|
+| One camera sees both doors | Nothing: a single camera covers every door. Named: `CAM_ENTRY_DOORS=male,female` |
+| One camera per door | Name the cameras after the doors (`male`, `female`): they link by themselves |
+| Mixed | e.g. `CAM_ENTRY_DOORS=male` and a camera named `female` |
+
+**From the admin panel (preferred):** once the backend sends `cameraDoors` in its 5-minute pull, the Pi uses those links instead of `.env`, so office staff can change them without touching the Pi. `facility health` → `camera_links.source` shows `admin` or `env`. The panel can name a camera by its name on the Pi or by its IP.
+
+Setting up the cameras:
+
+```bash
+facility camera setup entry      # asks, tests the stream, saves CAM_ENTRY_*, adds it to CAMERAS
+facility camera setup male       # pictures the male door's alerts
+facility camera setup female     # pictures the female door's alerts
+facility camera show             # every camera (passwords hidden) and the door links
+facility doctor camera           # each camera reachable, and which door it pictures
+```
+
+- **A camera covering doors with other names:** add `CAM_ENTRY_DOORS=male,female` with `facility config`. A camera with that list covers only the doors in it.
+- **Switching from one camera to several:** once `CAMERAS` is set, `CAM_HOST` / `CAM_RTSP` are no longer used, so set up the old camera under a name too.
+- **Check:** in `facility health`, `cameras` lists each one. After door test D7, the snapshot's file name ends with the camera's name (`…-male.jpg`), and the alert's `camera` field names it.
 
 ---
 

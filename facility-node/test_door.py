@@ -137,7 +137,9 @@ def make_doors(env=None, **kw):
     store.replace_tokens([("good", None), ("old", 1.0)])
     store.set_auth_code("auth-code-123")
     relay, up, clock = FakeRelay(), FakeUplink(), Clock()
-    doors = [DoorController(s, spec, store, relay, up, snapshot=lambda: "snap.jpg",
+    def shooter(cam):
+        return lambda: {"snapshot": "snap.jpg", "camera": cam}
+    doors = [DoorController(s, spec, store, relay, up, snapshot=shooter(spec.camera),
                             clock=clock, spawn=lambda fn: fn()) for spec in s.doors]
     return doors, relay, up, clock, store
 
@@ -230,8 +232,9 @@ class DoorTests(unittest.TestCase):
         self.assertEqual([(a["subtype"], a.get("repeat")) for a in alerts],
                          [("propped_open", False), ("propped_open", True),
                           ("propped_open", True), ("propped_resolved", None)])
-        self.assertEqual(alerts[0]["snapshot"], "snap.jpg")
-        self.assertNotIn("snapshot", alerts[1])
+        # A picture with every propped_open, repeats too; none with the all-clear
+        self.assertEqual([a.get("snapshot") for a in alerts],
+                         ["snap.jpg", "snap.jpg", "snap.jpg", None])
         self.assertEqual(alerts[-1]["duration_s"], 680)
         self.assertEqual(up.of("door_event")[-1],
                          {"facility": "facility-001", "section": "main", "type": "door_closed",
@@ -819,12 +822,14 @@ class TvocScoreTests(unittest.TestCase):
                 return dict(tvoc=3000, eco2=900, aqi=4, temperature=24.0, humidity=60.0)
 
         class Cam:
+            name = "main"
+
             def snapshot_status(self):
                 return {}
 
         up, stop = FakeUplink(), threading.Event()
         up.enqueue = (lambda orig: lambda kind, p: (orig(kind, p), stop.set()))(up.enqueue)
-        run_sensor_loop(settings(), OneReading(), Cam(), up, stop)
+        run_sensor_loop(settings(), OneReading(), [Cam()], up, stop)
         p = up.of("sensor")[0]
         self.assertEqual((p["tvoc"], p["tvoc_score"], p["tvoc_level"]), (3000, 65, "dangerous"))
 
@@ -1001,21 +1006,25 @@ class SnapshotUploadTests(unittest.TestCase):
 
         class Cam:
             s = self.s
+            name = "main"
 
             def snapshot(self):
                 return "snap1.jpg"
 
         door = DoorController(self.s, MAIN, self.store, FakeRelay(), self.uplink,
-                              snapshot=make_snapshotter(Cam(), self.uplink), spawn=lambda fn: fn())
+                              snapshot=lambda: {"snapshot": make_snapshotter(Cam(), self.uplink)(),
+                                                "camera": "main"},
+                              spawn=lambda fn: fn())
         door.door_opened()   # forced_open -> snapshot + alert
         self.assertEqual(self.uplink.flush(), 2)
         url, name, data, ctype, form, headers = self.http.uploads[0]
         self.assertTrue(url.endswith("/facility/snapshot"))
         self.assertEqual((name, data, ctype), ("snap1.jpg", b"\xff\xd8jpeg", "image/jpeg"))
-        self.assertEqual(form["name"], "snap1.jpg")
+        self.assertEqual((form["name"], form["camera"]), ("snap1.jpg", "main"))
         self.assertEqual(headers["Authorization"], "Bearer admin-secret")
         self.assertEqual(headers["Idempotency-Key"], form["id"])
-        self.assertEqual(self.http.posts[0][1]["snapshot"], "snap1.jpg")
+        alert = self.http.posts[0][1]
+        self.assertEqual((alert["snapshot"], alert["camera"]), ("snap1.jpg", "main"))
 
     def test_upload_retries_while_offline(self):
         self.uplink.queue_snapshot("a.jpg", self.jpeg(), "t")
@@ -1036,12 +1045,167 @@ class SnapshotUploadTests(unittest.TestCase):
         self.assertEqual(self.store.queue_size(), 0)
 
     def test_prune_old_snapshots(self):
-        from camera.camera import Camera
+        from camera.camera import prune_snapshots
         old, new = self.jpeg("old.jpg"), self.jpeg("new.jpg")
         os.utime(old, (0, 0))
-        cam = Camera(replace(self.s, snapshot_keep_days=7))
-        self.assertEqual(cam.prune_snapshots(), 1)
+        self.assertEqual(prune_snapshots(self.tmp.name, 7), 1)
         self.assertEqual(os.listdir(self.tmp.name), ["new.jpg"])
+
+
+CAMS = {
+    "CAMERAS": "entry,male,female",
+    "CAM_ENTRY_HOST": "192.168.10.149", "CAM_ENTRY_RTSP": "rtsp://u:p@192.168.10.149/s1",
+    "CAM_MALE_HOST": "192.168.10.150", "CAM_MALE_RTSP": "rtsp://u:p@192.168.10.150/s1",
+    "CAM_FEMALE_HOST": "192.168.10.151", "CAM_FEMALE_RTSP": "rtsp://u:p@192.168.10.151/s1",
+    "CAM_FEMALE_PORT": "8554",
+}
+
+
+class CameraConfigTests(unittest.TestCase):
+    """Several cameras; each door's alerts are pictured by the camera responsible for it."""
+
+    def test_no_camera_by_default(self):
+        s = settings(TWO_DOORS)
+        self.assertEqual(s.cameras, ())
+        self.assertEqual([d.camera for d in s.doors], [None, None])
+
+    def test_single_camera_covers_every_door(self):
+        s = settings({**TWO_DOORS, "CAM_HOST": "192.168.10.149",
+                      "CAM_RTSP": "rtsp://u:p@192.168.10.149/s1"})
+        self.assertEqual([(c.name, c.host, c.port) for c in s.cameras],
+                         [("main", "192.168.10.149", 554)])
+        self.assertEqual([d.camera for d in s.doors], ["main", "main"])
+
+    def test_single_camera_can_cover_one_door(self):
+        s = settings({**TWO_DOORS, "CAM_HOST": "192.168.10.149", "CAM_DOORS": "female"})
+        self.assertEqual({d.name: d.camera for d in s.doors}, {"male": None, "female": "main"})
+
+    def test_camera_named_after_door_covers_it(self):
+        s = settings({**TWO_DOORS, **CAMS})
+        self.assertEqual([(c.name, c.port) for c in s.cameras],
+                         [("entry", 554), ("male", 554), ("female", 8554)])
+        self.assertEqual({d.name: d.camera for d in s.doors}, {"male": "male", "female": "female"})
+
+    def test_one_camera_covers_two_doors(self):
+        s = settings({**TWO_DOORS, **CAMS, "CAM_ENTRY_DOORS": "Male, female"})
+        self.assertEqual({d.name: d.camera for d in s.doors}, {"male": "entry", "female": "entry"})
+
+    def test_listed_camera_covers_only_its_doors(self):
+        # "female" lists only male, so the female door has no camera
+        s = settings({**TWO_DOORS, **CAMS, "CAMERAS": "female", "CAM_FEMALE_DOORS": "male"})
+        self.assertEqual({d.name: d.camera for d in s.doors}, {"male": "female", "female": None})
+
+    def test_two_cameras_without_door_names_link_nothing(self):
+        s = settings({**TWO_DOORS, "CAMERAS": "a,b", "CAM_A_HOST": "10.0.0.1",
+                      "CAM_B_HOST": "10.0.0.2"})
+        self.assertEqual([d.camera for d in s.doors], [None, None])
+
+    def test_bad_camera_config_refused(self):
+        for env in ({"CAM_ENTRY_DOORS": "lobby"},             # no such door
+                    {"CAM_ENTRY_DOORS": "male", "CAM_MALE_DOORS": "male"},   # two cameras
+                    {"CAMERAS": "entry,entry"},
+                    {"CAMERAS": "entry,side"},                 # no CAM_SIDE_HOST / RTSP
+                    {"CAMERAS": "bad-name"}):
+            with self.assertRaises(ConfigError, msg=env):
+                settings({**TWO_DOORS, **CAMS, **env})
+
+    def test_camera_off_ignores_camera_settings(self):
+        s = settings({**TWO_DOORS, **CAMS, "ENABLE_CAMERA": "0", "CAM_ENTRY_DOORS": "lobby"})
+        self.assertEqual(s.cameras, ())
+        self.assertEqual([d.camera for d in s.doors], [None, None])
+
+    def test_monitor_switch(self):
+        self.assertTrue(settings(CAMS).cam_monitor)
+        self.assertFalse(settings({**CAMS, "CAM_MONITOR": "0"}).cam_monitor)
+
+    def test_alert_names_the_door_camera(self):
+        doors, _, up, _, _ = make_doors({**TWO_DOORS, **CAMS, "CAM_ENTRY_DOORS": "female"})
+        for d in doors:
+            d.door_opened()
+        self.assertEqual({a["section"]: a["camera"] for a in up.of("alert")},
+                         {"male": "male", "female": "entry"})
+
+    def test_health_lists_every_camera(self):
+        from camera.camera import Camera, CameraLinks
+        s = settings({**TWO_DOORS, **CAMS, "CAM_MONITOR": "0"})
+        cams = [Camera(s, spec) for spec in s.cameras]
+        cams[1]._update(reachable=True)
+        store = Store(":memory:")
+        up = Uplink(s, store, session=FakeSession())
+        h = create_app(s, [], store, up, cams,
+                       camera_links=CameraLinks(s, cams, store, up)).test_client().get("/health").json
+        self.assertEqual(sorted(h["cameras"]), ["entry", "female", "male"])
+        self.assertTrue(h["cameras"]["male"]["reachable"])
+        self.assertEqual((h["camera"]["reachable"], h["camera_monitor"]), (None, False))
+        self.assertEqual(h["camera_links"],
+                         {"source": "env", "doors": {"male": "male", "female": "female"}})
+
+    def test_snapshot_name_carries_camera(self):
+        from unittest import mock
+        from camera.camera import Camera
+        with tempfile.TemporaryDirectory() as tmp:
+            s = settings(CAMS, snapshot_dir=tmp)
+            cam = Camera(s, s.cameras[2])
+            with mock.patch("camera.camera.subprocess.run") as run:
+                run.return_value.returncode = 0
+                name = cam.snapshot()
+            self.assertTrue(name.endswith("-female.jpg"), name)
+            self.assertIn("rtsp://u:p@192.168.10.151/s1", run.call_args[0][0])
+
+
+class CameraLinksTests(unittest.TestCase):
+    """The admin panel decides which camera covers which door; .env is the fallback."""
+
+    def setUp(self):
+        from camera.camera import Camera, CameraLinks
+        self.s = settings({**TWO_DOORS, **CAMS})
+        self.store = Store(":memory:")
+        self.http = FakeSession()
+        self.up = Uplink(self.s, self.store, session=self.http)
+        cams = [Camera(self.s, spec) for spec in self.s.cameras]
+        for c in cams:
+            c.snapshot = (lambda n: lambda: f"shot-{n}.jpg")(c.name)
+        self.links = CameraLinks(self.s, cams, self.store, self.up)
+
+    def pull(self, **body):
+        self.http.get_resp = FakeResp(200, {"facilityId": "facility-001", "tokens": [], **body})
+        self.assertTrue(self.up.pull_tokens())
+
+    def test_env_links_until_the_panel_sends_some(self):
+        self.pull()
+        self.assertEqual(self.links.links(), ({"male": "male", "female": "female"}, "env"))
+
+    def test_panel_links_replace_env(self):
+        self.pull(cameraDoors={"entry": ["male", "female"]})
+        self.assertEqual(self.links.links(), ({"male": "entry", "female": "entry"}, "admin"))
+        self.assertEqual(self.links.snapshotter("female")(),
+                         {"snapshot": "shot-entry.jpg", "camera": "entry"})
+
+    def test_panel_may_name_camera_by_ip(self):
+        self.pull(cameraDoors={"192.168.10.151": ["male"]})
+        # the panel is the authority: a door it leaves out has no camera
+        self.assertEqual(self.links.links()[0], {"male": "female", "female": None})
+        self.assertIsNone(self.links.snapshotter("female")())
+
+    def test_bad_panel_links_fall_back_to_env(self):
+        for bad in ({"lobby": ["male"]}, {"entry": ["kitchen"]},
+                    {"entry": ["male"], "male": ["male"]}, ["entry"]):
+            self.pull(cameraDoors=bad)
+            self.assertEqual(self.links.links()[1], "env", bad)
+
+    def test_panel_links_survive_restart_and_can_be_cleared(self):
+        from camera.camera import CameraLinks
+        self.pull(cameraDoors={"entry": ["male"]})
+        again = CameraLinks(self.s, list(self.links.cameras.values()), self.store, self.up)
+        self.assertEqual(again.links()[1], "admin")
+        self.pull(cameraDoors=None)
+        self.assertEqual(again.links()[1], "env")
+
+    def test_failed_pull_keeps_panel_links(self):
+        self.pull(cameraDoors={"entry": ["male"]})
+        self.http.online = False
+        self.assertFalse(self.up.pull_tokens())
+        self.assertEqual(self.links.links()[1], "admin")
 
 
 class StubQRSession:
@@ -1412,6 +1576,20 @@ class DummyBackendTests(unittest.TestCase):
         self.assertEqual(self.c.get("/api/facility/tokens?facility=f", headers=self.H).status_code, 503)
         self.c.post("/admin/outage?on=0")
         self.assertEqual(self.c.get("/api/facility/tokens?facility=f", headers=self.H).status_code, 200)
+
+    def test_camera_links_from_dummy_panel(self):
+        from camera.camera import Camera, CameraLinks
+        self.app = __import__("dummy_backend").create_app(
+            data_dir=self.tmp.name, quiet=True, camera_doors={"entry": ["male", "female"]})
+        self.c = self.app.test_client()
+        s = settings({**TWO_DOORS, **CAMS, "ADMIN_URL": "http://127.0.0.1:8091/api",
+                      "ADMIN_KEY": "dummy-key"})
+        store = Store(":memory:")
+        up = Uplink(s, store, session=self.bridge())
+        self.assertTrue(up.pull_tokens())
+        links = CameraLinks(s, [Camera(s, c) for c in s.cameras], store, up)
+        self.assertEqual(links.state(),
+                         {"source": "admin", "doors": {"male": "entry", "female": "entry"}})
 
     def test_paid_entry_against_dummy(self):
         """Balance, one charge per scan_id, refund on relay_failed: the real

@@ -8,7 +8,7 @@ import ipaddress
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional, Tuple
 
 PLACEHOLDER = "CHANGE_ME"
@@ -146,6 +146,16 @@ class DoorSpec:
     reed_gpio: Optional[int]      # Pi BCM pin for this door's MC-38, None = no reed
     scanner_ips: Tuple[str, ...]  # QR scanners whose scans open this door
     unlock_seconds: float = UNLOCK_DEFAULT   # QR / app unlock time; the exit button uses its timer
+    camera: Optional[str] = None  # camera that snapshots this door's alerts, None = no picture
+
+
+@dataclass(frozen=True)
+class CameraSpec:
+    """One IP camera: where to probe it and the RTSP stream for its pictures."""
+    name: str                     # e.g. "entry", "male", "female"
+    host: str
+    port: int
+    rtsp: str
 
 
 def _optional_int(name):
@@ -219,6 +229,69 @@ def _validate_doors(doors):
         raise ConfigError("with several doors, every door needs SCANNER_IPS")
 
 
+def _parse_cameras():
+    """CAMERAS=entry,male,female + CAM_<NAME>_{HOST,PORT,RTSP}.
+
+    Without CAMERAS: one camera named "main" from CAM_HOST / CAM_PORT / CAM_RTSP,
+    or none when both are empty (the single-camera .env keeps working).
+    """
+    names = _env("CAMERAS")
+    if names is None:
+        host, rtsp = _env("CAM_HOST", ""), _env("CAM_RTSP", "")
+        return (CameraSpec("main", host, _int("CAM_PORT", 554), rtsp),) if host or rtsp else ()
+    cameras = []
+    for name in [n.strip().lower() for n in names.split(",") if n.strip()]:
+        if not re.fullmatch(r"[a-z0-9_]+", name):
+            raise ConfigError(f"bad camera name {name!r} in CAMERAS")
+        if name in [c.name for c in cameras]:
+            raise ConfigError(f"camera {name!r} listed twice in CAMERAS")
+        pre = f"CAM_{name.upper()}_"
+        host, rtsp = _env(pre + "HOST", ""), _env(pre + "RTSP", "")
+        if not (host or rtsp):
+            raise ConfigError(f"camera {name}: set {pre}HOST and {pre}RTSP")
+        cameras.append(CameraSpec(name, host, _int(pre + "PORT", 554), rtsp))
+    return tuple(cameras)
+
+
+def _link_door_cameras(doors, cameras):
+    """Which camera pictures each door's alerts (one camera per door).
+
+    CAM_<NAME>_DOORS=male,female (CAM_DOORS for the single camera) lists the doors
+    a camera covers. A camera without that list covers the door with its own
+    name, and the only camera covers every door. The admin panel can change
+    this at runtime (camera.CameraLinks); this is the .env default.
+    """
+    door_names = [d.name for d in doors]
+    single = _env("CAMERAS") is None
+    owner = {}                    # door -> camera, from CAM_<NAME>_DOORS
+    listed = set()                # cameras with an explicit list
+    for c in cameras:
+        raw = _env("CAM_DOORS" if single else f"CAM_{c.name.upper()}_DOORS")
+        if raw is None:
+            continue
+        listed.add(c.name)
+        for door in [n.strip().lower() for n in raw.split(",") if n.strip()]:
+            if door == "none":
+                continue
+            if door not in door_names:
+                raise ConfigError(f"camera {c.name}: door {door!r} is not in DOORS "
+                                  f"({', '.join(door_names) or 'doors off'})")
+            if door in owner:
+                raise ConfigError(f"door {door} is covered by two cameras "
+                                  f"({owner[door]}, {c.name}): one camera per door")
+            owner[door] = c.name
+    free = [c.name for c in cameras if c.name not in listed]
+    linked = []
+    for d in doors:
+        cam = owner.get(d.name)
+        if cam is None and d.name in free:
+            cam = d.name
+        elif cam is None and len(cameras) == 1 and free:
+            cam = free[0]
+        linked.append(replace(d, camera=cam))
+    return tuple(linked)
+
+
 @dataclass(frozen=True)
 class Settings:
     facility_id: str
@@ -268,10 +341,9 @@ class Settings:
     sensor_url: str
     sensor_timeout: float
 
-    # Camera
-    cam_host: str
-    cam_port: int
-    cam_rtsp: str
+    # Cameras (CAMERAS, or the single CAM_HOST / CAM_RTSP camera "main")
+    cameras: Tuple[CameraSpec, ...]
+    cam_monitor: bool          # health checks (probe + frozen feed); off = alert snapshots only
     snapshot_dir: str
     snapshot_upload_path: str  # PENDING backend: multipart upload endpoint; "" = off
     snapshot_keep_days: int
@@ -327,6 +399,10 @@ class Settings:
         if not (doors_on or camera_on or odour_on):
             raise ConfigError("ENABLE_DOORS, ENABLE_CAMERA and ENABLE_ODOUR are all off: "
                               "turn at least one on")
+        cameras = _parse_cameras() if camera_on else ()
+        doors = _parse_doors() if doors_on else ()
+        if camera_on:
+            doors = _link_door_cameras(doors, cameras)
         return cls(
             facility_id=_required("FACILITY_ID"),
             enable_doors=doors_on,
@@ -334,7 +410,7 @@ class Settings:
             enable_odour=odour_on,
             relay_url=_required("RELAY_URL").rstrip("/") if doors_on else "",
             relay_pwd=_required("RELAY_PWD") if doors_on else "",
-            doors=_parse_doors() if doors_on else (),
+            doors=doors,
             exit_poll_interval=_float("EXIT_POLL_INTERVAL", 0.2),
             admin_url=admin_url,
             admin_key=_required("ADMIN_KEY"),
@@ -367,9 +443,8 @@ class Settings:
                 "ATTENDANT_PURPOSES", "cleaning,bath,toilet,maintenance").split(",") if p.strip()),
             sensor_url=_env("SENSOR_URL", ""),
             sensor_timeout=_float("SENSOR_TIMEOUT", 3.0),
-            cam_host=_env("CAM_HOST", ""),
-            cam_port=_int("CAM_PORT", 554),
-            cam_rtsp=_env("CAM_RTSP", ""),
+            cameras=cameras,
+            cam_monitor=_bool("CAM_MONITOR", True),
             snapshot_dir=_env("SNAPSHOT_DIR", "/var/lib/facility/snapshots"),
             snapshot_upload_path=_env("SNAPSHOT_UPLOAD_PATH", ""),
             snapshot_keep_days=_int("SNAPSHOT_KEEP_DAYS", 7),

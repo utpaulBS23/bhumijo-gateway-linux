@@ -83,7 +83,7 @@ Inside the Pi, a single Python service (`facility-node`, run by systemd). Each f
 | 1 Door | **Exit tracking** | Exit button opens the door in hardware; a second contact into the KC868 lets the Pi log an `exit` |
 | 1 Door | **Door anomalies** | Reed switch per door: `forced_open` (opened with no trigger), `propped_open` (repeats while open), `propped_resolved` |
 | 2 Camera | **Camera health** | Reachability probe, frozen-feed detection; set up with `facility camera` |
-| 2 Camera | **Snapshots** | JPEG on door anomalies, optional upload |
+| 2 Camera | **Snapshots** | JPEG on door anomalies from that door's camera (several cameras supported), optional upload |
 | 3 Odour | **Air quality** | ENS160 (TVOC, eCO2, AQI) + AHT20 (temperature, humidity) every 60 s, on the Pi's I2C or an ESP32-S3 WiFi board (`facility sensor`) |
 | 3 Odour | **TVOC score + odour alert** | TVOC as 0–100 with five levels; `odour_high` / `odour_resolved` alerts against per-site limits; optional MQ-135 (ammonia) and MQ-136 (H2S) through an ADS1115 |
 | all | **Function switches** | `facility feature camera off`: a site runs only the functions it has hardware for |
@@ -192,7 +192,7 @@ Five failures from one phone in 60 s → `429` for a minute.
 |---|---|
 | Valid QR / app unlock or exit press on **this door** within `CLASSIFY_WINDOW` (15 s) | Normal opening (already logged as entry / attendant / exit) |
 | Opening with no trigger | Alert `forced_open` + snapshot |
-| Open ≥ `PROPPED_THRESHOLD` (300 s) | Alert `propped_open` (`repeat:false`, snapshot), then every `PROPPED_REPEAT` (180 s) with `repeat:true` |
+| Open ≥ `PROPPED_THRESHOLD` (300 s) | Alert `propped_open` (`repeat:false`), then every `PROPPED_REPEAT` (180 s) with `repeat:true`; each with a snapshot from the door's camera |
 | Door closes | Door-event `door_closed` + `duration_s`; `propped_resolved` if it was propped |
 
 Each door keeps its own state. A male QR scan doesn't excuse a female door opening.
@@ -233,7 +233,10 @@ All settings live in `/opt/facility-node/.env`, loaded by systemd. **`.env.examp
 | 1 Door | Attendant purposes | `ATTENDANT_PURPOSES` | what personal use may be for; default `cleaning,bath,toilet,maintenance` |
 | 1 Door | Scanner messages | `SCANNER_MSG_OPENED`, `_NO_BALANCE`, `_OFFLINE`, `_DENIED`, `_ERROR` | what the scanner shows; English defaults |
 | 1 Door | Bench test | `DOOR_TEST_ENDPOINTS` | keep `0` in production |
-| 2 Camera | Camera | `CAM_HOST`, `CAM_PORT`, `CAM_RTSP`, `CAM_PROBE_INTERVAL`, `CAM_FRAME_INTERVAL` | set with `facility camera` |
+| 2 Camera | Camera | `CAM_HOST`, `CAM_PORT`, `CAM_RTSP`, `CAM_PROBE_INTERVAL`, `CAM_FRAME_INTERVAL` | one camera; set with `facility camera` |
+| 2 Camera | Several cameras | `CAMERAS`, `CAM_<NAME>_HOST`, `CAM_<NAME>_PORT`, `CAM_<NAME>_RTSP` | replaces the single camera; `facility camera setup <name>` |
+| 2 Camera | Camera's doors | `CAM_<NAME>_DOORS` (`CAM_DOORS` for the single camera) | doors that camera pictures, e.g. `male,female`; one camera per door. Unset = the door with the camera's name; a single camera covers every door. The admin panel overrides it (`cameraDoors`, section 8) |
+| 2 Camera | Health checks | `CAM_MONITOR` | `1` (default); `0` = no reachability / frozen-feed checks, alert snapshots still taken |
 | 2 Camera | Snapshots | `SNAPSHOT_DIR`, `SNAPSHOT_UPLOAD_PATH`, `SNAPSHOT_KEEP_DAYS` | upload off when the path is empty |
 | 3 Odour | Air sensor board | `SENSOR_URL`, `SENSOR_TIMEOUT` | empty URL = ENS160/AHT20 on the Pi's I2C; set with `facility sensor enable` |
 | 3 Odour | Odour alert | `ODOUR_TVOC_SCORE_LIMIT`, `ODOUR_TVOC_LIMIT`, `_AQI_LIMIT`, `_NH3_LIMIT`, `_H2S_LIMIT`, `ODOUR_HOLD`, `_REPEAT`, `_CLEAR_HOLD` | empty limit = metric off |
@@ -280,10 +283,14 @@ All calls go **Pi → backend**, with header `ADMIN_AUTH_HEADER: ADMIN_AUTH_SCHE
  "tvoc": 120, "tvoc_score": 11, "tvoc_level": "very_good",
  "eco2": 450, "aqi": 2, "temperature": 28.4, "humidity": 71.2,
  "nh3_ppm": 3.1, "h2s_ppm": 0.2,
- "camera": {"reachable": true, "streaming": true, "frozen": false, "checked_at": "…"}}
+ "camera": {"reachable": true, "streaming": true, "frozen": false, "checked_at": "…"},
+ "cameras": {"male": {"reachable": true, "streaming": true, "frozen": false, "checked_at": "…"},
+             "female": {"reachable": false, "streaming": false, "frozen": null, "checked_at": "…"}}}
 ```
 
-Values are `null` when a sensor is warming up, failed, or not fitted. `tvoc_score` (0–100) and `tvoc_level` come from `tvoc` (section 5.4) and are `null` with it. With `ENABLE_ODOUR=0` every air value is `null`; with `ENABLE_CAMERA=0`, `camera` is `null`. The push runs while either is on.
+Values are `null` when a sensor is warming up, failed, or not fitted. `tvoc_score` (0–100) and `tvoc_level` come from `tvoc` (section 5.4) and are `null` with it. With `ENABLE_ODOUR=0` every air value is `null`; with `ENABLE_CAMERA=0` (or no camera set), `camera` and `cameras` are `null`. The push runs while either is on.
+
+`cameras` has every camera by name (the single-camera setup is named `main`); `camera` repeats the first one for backends that predate several cameras. With `CAM_MONITOR=0` the camera values stay `null`.
 
 ### Push door-event: `POST DOOR_EVENT_PATH` (per event)
 
@@ -304,13 +311,14 @@ Values are `null` when a sensor is warming up, failed, or not fitted. `tvoc_scor
 
 ```json
 {"id": "c9a0…", "facility": "facility-001", "section": "female", "type": "anomaly", "subtype": "propped_open",
- "ts": "…Z", "duration_s": 300, "repeat": false, "snapshot": "20261002T101500Z.jpg"}
+ "ts": "…Z", "duration_s": 300, "repeat": false,
+ "snapshot": "20261002T101500Z-female.jpg", "camera": "female"}
 ```
 
 | `subtype` | Fields | Backend handling |
 |---|---|---|
-| `forced_open` | `section`, `snapshot?` | New alarm |
-| `propped_open` | `section`, `duration_s`, `repeat`, `snapshot?` (first only) | `repeat:false` = new alarm, `true` = update |
+| `forced_open` | `section`, `snapshot?`, `camera?` | New alarm |
+| `propped_open` | `section`, `duration_s`, `repeat`, `snapshot?`, `camera?` (every one, repeats too) | `repeat:false` = new alarm, `true` = update |
 | `propped_resolved` | `section`, `duration_s` | All-clear |
 | `odour_high` | `duration_s`, `repeat`, `metrics` (e.g. `["tvoc_score"]`), `readings` (no `section`) | `repeat:false` = new alarm, `true` = update |
 | `odour_resolved` | `duration_s`, `readings` | All-clear |
@@ -319,8 +327,11 @@ Values are `null` when a sensor is warming up, failed, or not fitted. `tvoc_scor
 
 ```json
 {"facilityId": "facility-001", "authCode": "<facility app auth code>",
- "tokens": [{"token": "abc…", "expiresAt": "2026-10-03T00:00:00Z"}, {"token": "def…", "expiresAt": null}]}
+ "tokens": [{"token": "abc…", "expiresAt": "2026-10-03T00:00:00Z"}, {"token": "def…", "expiresAt": null}],
+ "cameraDoors": {"entry": ["male", "female"]}}
 ```
+
+`cameraDoors` (optional) is the admin panel's choice of which camera pictures which door: camera name (as in `CAMERAS`, or `main` for a single camera) or camera IP → list of doors (sections). One camera per door; a door left out gets no picture. When present it replaces the `.env` links (`CAM_<NAME>_DOORS`) and is kept on the Pi across reboots; missing, `null` or `{}` = use `.env`. A reply that names an unknown camera or door, or gives a door two cameras, is ignored (logged) and `.env` is used. Camera logins never come from the backend.
 
 The reply **replaces** the cache, so an empty list revokes everything. `expiresAt` can be ISO 8601, unix seconds or milliseconds, or null. A reply for a different `facilityId` is ignored. If the pull fails, the cache is kept.
 
@@ -340,7 +351,7 @@ The method, field names, extra fields, reply field, allow values and deny status
 
 ### Optional: snapshot upload (`SNAPSHOT_UPLOAD_PATH`)
 
-Multipart `POST` with field `file` (image/jpeg) plus form fields `id`, `facility`, `name` and `ts`. It's queued **before** its alert, so the image arrives first. The alert's `snapshot` equals `name`.
+Multipart `POST` with field `file` (image/jpeg) plus form fields `id`, `facility`, `name`, `ts` and `camera` (the camera's name). It's queued **before** its alert, so the image arrives first. The alert's `snapshot` equals `name`, and its `camera` names the camera that took it (the camera responsible for that door).
 
 ### Retry rules (all pushes)
 

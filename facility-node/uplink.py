@@ -10,6 +10,7 @@ retry later); a 4xx means the backend rejected that item, which is retried a
 few times and then dropped so one bad row cannot block the queue forever.
 """
 
+import json
 import logging
 import threading
 import time
@@ -81,11 +82,13 @@ class Uplink:
     def uploads_snapshots(self):
         return bool(self.s.snapshot_upload_path)
 
-    def queue_snapshot(self, name, path, ts):
+    def queue_snapshot(self, name, path, ts, camera=None):
         """Queue a JPEG for upload. The alert refers to it by `name`."""
         if self.uploads_snapshots:
-            self.enqueue("snapshot", {"facility": self.s.facility_id, "name": name,
-                                      "path": path, "ts": ts})
+            payload = {"facility": self.s.facility_id, "name": name, "path": path, "ts": ts}
+            if camera:
+                payload["camera"] = camera
+            self.enqueue("snapshot", payload)
 
     def _post(self, kind, payload):
         """POST one outbox row. Returns a response, or None if the row is moot."""
@@ -96,7 +99,7 @@ class Uplink:
         if kind != "snapshot":
             return self.session.post(url, json=payload, headers=headers,
                                      timeout=self.timeout)
-        # Multipart: field "file" + form fields id/facility/name/ts
+        # Multipart: field "file" + form fields id/facility/name/ts/camera
         try:
             fh = open(payload["path"], "rb")
         except OSError:
@@ -105,7 +108,8 @@ class Uplink:
         with fh:
             return self.session.post(
                 url, files={"file": (payload["name"], fh, "image/jpeg")},
-                data={k: payload[k] for k in ("id", "facility", "name", "ts") if k in payload},
+                data={k: payload[k] for k in ("id", "facility", "name", "ts", "camera")
+                      if k in payload},
                 headers=headers, timeout=max(self.timeout, 30))
 
     def flush(self, batch=50):
@@ -175,6 +179,10 @@ class Uplink:
         auth_code = body.get("authCode")
         if auth_code:
             self.store.set_auth_code(auth_code)
+        # Admin panel's camera -> doors links ({"entry": ["male", "female"]});
+        # missing or null = use the .env links. camera.CameraLinks checks it.
+        links = body.get("cameraDoors")
+        self.store.set_cred("camera_doors", json.dumps(links) if links else "")
         self.store.set_cred("last_pull", str(time.time()))
         self.last_pull_ok = time.time()
         log.info("token cache refreshed: %d tokens", len(tokens))

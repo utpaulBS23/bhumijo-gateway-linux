@@ -22,6 +22,8 @@ from collections import defaultdict, deque
 
 from flask import Flask, g, jsonify, request
 
+from camera.camera import camera_fields
+
 log = logging.getLogger("app")
 
 STATUS = {"opened": 200, "denied": 403, "relay_error": 502,
@@ -157,8 +159,8 @@ class FailureLimiter:
             q.append(now)
 
 
-def create_app(settings, doors, store, uplink, camera=None, limiter=None, odour=None,
-               qr_api=None):
+def create_app(settings, doors, store, uplink, cameras=(), limiter=None, odour=None,
+               qr_api=None, camera_links=None):
     """doors: list of DoorController, one per section."""
     app = Flask(__name__)
     limiter = limiter or FailureLimiter()
@@ -296,7 +298,9 @@ def create_app(settings, doors, store, uplink, camera=None, limiter=None, odour=
                             "unlock_s": d.door.unlock_seconds,
                             "scanners": list(d.door.scanner_ips)} for d in doors},
             reed=settings.reed,
-            camera=camera.snapshot_status() if camera else None,
+            **camera_fields(cameras),
+            camera_monitor=settings.cam_monitor if cameras else None,
+            camera_links=camera_links.state() if camera_links else None,
             odour=odour.state() if odour else None,
             qr_api=qr_api.state() if qr_api else None,
         )
@@ -307,7 +311,7 @@ def create_app(settings, doors, store, uplink, camera=None, limiter=None, odour=
 def main():
     import os
 
-    from camera.camera import Camera, make_snapshotter
+    from camera.camera import Camera, CameraLinks, run_prune_loop
     from config import Settings
     from door import DoorController
     from door.inputs import ReedSwitch, run_door_ticker, run_exit_poller
@@ -332,8 +336,8 @@ def main():
 
     # Each function only builds its parts when it is switched on
     relay = Relay(s.relay_url, s.relay_pwd) if s.enable_doors else None
-    camera = Camera(s) if s.enable_camera else None
-    snapshot = make_snapshotter(camera, uplink) if camera else None
+    cameras = [Camera(s, spec) for spec in s.cameras]   # empty when the camera function is off
+    links = CameraLinks(s, cameras, store, uplink) if cameras else None
     odour = OdourMonitor(s, uplink) if s.enable_odour else None
     sensors = make_sensors(s) if s.enable_odour else None
     mq = MQSensors(s) if s.enable_odour and s.mq else None
@@ -343,7 +347,10 @@ def main():
         if any(h in s.qr_api_url for h in ("localhost", "127.0.0.1")):
             log.warning("QR_API_URL points at this machine (%s): dummy API? "
                         "Never leave this on in production", s.qr_api_url)
-    doors = [DoorController(s, spec, store, relay, uplink, snapshot=snapshot, qr_api=qr_api)
+    # Each door's alerts are pictured by its camera (admin panel, else CAM_<NAME>_DOORS)
+    doors = [DoorController(s, spec, store, relay, uplink,
+                            snapshot=links.snapshotter(spec.name) if links else None,
+                            qr_api=qr_api)
              for spec in s.doors]   # empty when doors are off
 
     stop = threading.Event()
@@ -352,11 +359,14 @@ def main():
         jobs += [lambda: uplink.run_pull_loop(stop),   # tokens + Auth Code
                  lambda: run_exit_poller(s, relay, doors, stop),
                  lambda: run_door_ticker(doors, stop)]
-    if sensors or camera:
-        jobs += [lambda: run_sensor_loop(s, sensors, camera, uplink, stop, mq=mq, odour=odour)]
-    if camera:
-        jobs += [lambda: camera.run_probe_loop(stop),
-                 lambda: camera.run_frame_loop(stop)]
+    if sensors or cameras:
+        jobs += [lambda: run_sensor_loop(s, sensors, cameras, uplink, stop, mq=mq, odour=odour)]
+    if cameras:
+        jobs += [lambda: run_prune_loop(s, stop)]
+    if s.cam_monitor:   # CAM_MONITOR=0: no health checks, alert snapshots only
+        for cam in cameras:
+            jobs += [lambda c=cam: c.run_probe_loop(stop),
+                     lambda c=cam: c.run_frame_loop(stop)]
     for job in jobs:
         threading.Thread(target=job, daemon=True).start()
 
@@ -367,21 +377,28 @@ def main():
     log.info("functions: doors %s, camera %s, odour %s",
              on(s.enable_doors), on(s.enable_camera), on(s.enable_odour))
     for d in s.doors:
-        log.info("door %s: relay %d, unlock %g s, exit input %s, reed GPIO %s, scanners %s",
-                 d.name, d.relay, d.unlock_seconds, d.exit_input, d.reed_gpio,
-                 ", ".join(d.scanner_ips) or "any")
+        log.info("door %s: relay %d, unlock %g s, exit input %s, reed GPIO %s, scanners %s, "
+                 ".env camera %s", d.name, d.relay, d.unlock_seconds, d.exit_input, d.reed_gpio,
+                 ", ".join(d.scanner_ips) or "any", d.camera or "none")
     if doors:
         log.info("QR validation: %s", f"{s.qr_api_method} {s.qr_api_url} ({s.qr_api_order})"
                  if qr_api else "local cache only")
-    if camera:
-        log.info("camera %s; snapshot upload %s", s.cam_host or "not set",
-                 s.snapshot_upload_path or "off")
+    if links:
+        door_cams, source = links.links()
+        for c in s.cameras:
+            log.info("camera %s: %s; pictures door %s (%s)", c.name, c.host or "no host",
+                     ", ".join(d for d, cam in door_cams.items() if cam == c.name) or "none",
+                     "admin panel" if source == "admin" else ".env")
+    if s.enable_camera:
+        log.info("camera health checks %s; snapshot upload %s",
+                 on(s.cam_monitor and s.cameras), s.snapshot_upload_path or "off")
     if odour:
         log.info("air sensors: %s", s.sensor_url or "I2C on the Pi")
         log.info("odour limits %s; MQ sensors %s", odour.limits or "off", on(mq))
     log.info("facility node %s listening on %s:%d", s.facility_id, s.host, s.port)
     try:
-        create_app(s, doors, store, uplink, camera, odour=odour, qr_api=qr_api).run(
+        create_app(s, doors, store, uplink, cameras, odour=odour, qr_api=qr_api,
+                   camera_links=links).run(
             host=s.host, port=s.port, threaded=True)
     finally:
         stop.set()
