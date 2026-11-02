@@ -222,6 +222,7 @@ All settings live in `/opt/facility-node/.env`, loaded by systemd. **`.env.examp
 |---|---|---|---|
 | shared | Identity | `FACILITY_ID` | required |
 | shared | **Functions** | `ENABLE_DOORS`, `ENABLE_CAMERA`, `ENABLE_ODOUR` | `1` (default) / `0`; at least one on. An off function's keys below aren't required. `facility feature` |
+| shared | Device MAC | `DEVICE_MAC` | sent with the settings pull (`mac`) to match the Device List; empty = eth0's MAC |
 | shared | Backend | `ADMIN_URL`, `ADMIN_KEY`, `ADMIN_AUTH_HEADER`, `ADMIN_AUTH_SCHEME`, `SENSOR_PATH`, `DOOR_EVENT_PATH`, `ALERT_PATH`, `TOKENS_PATH` | URL and key required |
 | shared | Storage | `DB_PATH`, `MAX_QUEUE` | |
 | shared | Timing | `SENSOR_INTERVAL`, `PULL_INTERVAL`, `FLUSH_INTERVAL` | seconds |
@@ -325,7 +326,9 @@ Values are `null` when a sensor is warming up, failed, or not fitted. `tvoc_scor
 | `odour_high` | `duration_s`, `repeat`, `metrics` (e.g. `["tvoc_score"]`), `readings` (no `section`) | `repeat:false` = new alarm, `true` = update |
 | `odour_resolved` | `duration_s`, `readings` | All-clear |
 
-### Pull tokens: `GET TOKENS_PATH?facility=<id>` (every 5 min)
+### Pull tokens: `GET TOKENS_PATH?facility=<id>&mac=<mac>` (every 5 min)
+
+`mac` is this Pi's MAC address (`DEVICE_MAC`, default eth0's, lower case with colons, e.g. `2c:cf:67:01:a7:ea`), so the backend can match it with the MAC in the Device List. Left out when the Pi can't read one.
 
 ```json
 {"facilityId": "facility-001", "authCode": "<facility app auth code>",

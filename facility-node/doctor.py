@@ -68,6 +68,11 @@ def check_config(r, env_path):
         r.line(FAIL, ".env invalid", str(e))
         return None
     r.line(OK, f"facility {s.facility_id}")
+    if s.device_mac:
+        r.line(OK, f"MAC {s.device_mac}", "sent with the settings pull; must match "
+               "the Device List entry" + ("" if os.environ.get("DEVICE_MAC") else " (eth0)"))
+    else:
+        r.line(WARN, "MAC address unknown", "set DEVICE_MAC (as in the Device List)")
     r.line(OK, "functions", ", ".join(f"{f} {'on' if getattr(s, 'enable_' + f) else 'OFF'}"
                                       for f in FEATURES))
     for d in s.doors:
@@ -204,7 +209,7 @@ def check_backend(r, s):
     r.section(f"Admin backend ({s.admin_url})")
     up = Uplink(s, store=None)
     try:
-        resp = requests.get(up._url(s.tokens_path), params={"facility": s.facility_id},
+        resp = requests.get(up._url(s.tokens_path), params=up.pull_params(),
                             headers=up.auth_headers(), timeout=8)
     except requests.RequestException as e:
         r.line(WARN, "not reachable", f"{type(e).__name__}; events queue on the Pi"

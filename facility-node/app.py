@@ -287,6 +287,7 @@ def create_app(settings, doors, store, uplink, cameras=(), limiter=None, odour=N
         return jsonify(
             ok=True,
             facility=settings.facility_id,
+            mac=settings.device_mac or None,
             features={"doors": settings.enable_doors, "camera": settings.enable_camera,
                       "odour": settings.enable_odour},
             queue=store.queue_size(),

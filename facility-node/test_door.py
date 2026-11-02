@@ -314,13 +314,54 @@ class OfflineTests(unittest.TestCase):
         self.assertTrue(self.store.token_valid("t1"))
         self.assertTrue(self.store.token_valid("t2"))
         self.assertTrue(self.store.auth_code_valid("new-code"))
-        self.assertEqual(self.http.get_calls[0][1], {"facility": "facility-001"})
+        self.assertEqual(self.http.get_calls[0][1]["facility"], "facility-001")
 
     def test_pull_for_other_facility_ignored(self):
         self.store.replace_tokens([("cached", None)])
         self.http.get_resp = FakeResp(200, {"facilityId": "facility-999", "tokens": []})
         self.assertFalse(self.uplink.pull_tokens())
         self.assertTrue(self.store.token_valid("cached"))
+
+
+class DeviceMacTests(unittest.TestCase):
+    """The settings pull carries this Pi's MAC to match the Device List."""
+
+    def test_pull_sends_mac(self):
+        http = FakeSession()
+        up = Uplink(settings(device_mac="2c:cf:67:01:a7:ea"), Store(":memory:"), session=http)
+        up.pull_tokens()
+        self.assertEqual(http.get_calls[0][1],
+                         {"facility": "facility-001", "mac": "2c:cf:67:01:a7:ea"})
+
+    def test_no_mac_left_out(self):
+        http = FakeSession()
+        up = Uplink(settings(device_mac=""), Store(":memory:"), session=http)
+        up.pull_tokens()
+        self.assertEqual(http.get_calls[0][1], {"facility": "facility-001"})
+
+    def test_device_mac_setting_normalised(self):
+        self.assertEqual(settings({"DEVICE_MAC": "2C-CF-67-01-A7-EA"}).device_mac,
+                         "2c:cf:67:01:a7:ea")
+        with self.assertRaises(ConfigError):
+            settings({"DEVICE_MAC": "not-a-mac"})
+
+    def test_mac_read_from_eth0_first(self):
+        import config
+        with tempfile.TemporaryDirectory() as d:
+            for name, mac in (("lo", "00:00:00:00:00:00"), ("eth0", "2C:CF:67:01:A7:EA"),
+                              ("wlan0", "2c:cf:67:01:a7:eb")):
+                os.makedirs(os.path.join(d, name))
+                with open(os.path.join(d, name, "address"), "w") as f:
+                    f.write(mac + "\n")
+            old = os.environ.pop("DEVICE_MAC", None)
+            try:
+                self.assertEqual(config._device_mac(d), "2c:cf:67:01:a7:ea")
+                os.remove(os.path.join(d, "eth0", "address"))
+                self.assertEqual(config._device_mac(d), "2c:cf:67:01:a7:eb")
+                self.assertEqual(config._device_mac(os.path.join(d, "missing")), "")
+            finally:
+                if old is not None:
+                    os.environ["DEVICE_MAC"] = old
 
 
 class EventIdTests(unittest.TestCase):

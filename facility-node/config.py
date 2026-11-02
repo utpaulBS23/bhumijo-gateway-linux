@@ -119,6 +119,34 @@ def _device_auth_code(admin_url):
     return _required("DEVICE_AUTH_CODE")
 
 
+_MAC = re.compile(r"^[0-9a-f]{2}([:-][0-9a-f]{2}){5}$")
+
+
+def _device_mac(net_dir="/sys/class/net"):
+    """This Pi's MAC, sent with the settings pull so the backend can match the
+    Device List entry. DEVICE_MAC overrides; else eth0's (fixed on the board,
+    the same whether the Pi uses cable or WiFi); else the first interface's."""
+    raw = _env("DEVICE_MAC")
+    if raw:
+        mac = raw.lower()
+        if not _MAC.match(mac):
+            raise ConfigError(f"DEVICE_MAC {raw!r} is not a MAC address (e.g. 2c:cf:67:01:a7:ea)")
+        return mac.replace("-", ":")
+    try:
+        names = sorted(os.listdir(net_dir), key=lambda n: (n != "eth0", n))
+    except OSError:
+        return ""
+    for name in names:
+        try:
+            with open(os.path.join(net_dir, name, "address")) as f:
+                mac = f.read().strip().lower()
+        except OSError:
+            continue
+        if _MAC.match(mac) and mac != "00:00:00:00:00:00":
+            return mac
+    return ""
+
+
 def _qr_api_extra():
     raw = _env("QR_API_EXTRA", "")
     if not raw:
@@ -303,6 +331,7 @@ def _link_door_cameras(doors, cameras):
 @dataclass(frozen=True)
 class Settings:
     facility_id: str
+    device_mac: str            # sent with the settings pull; "" = unknown
 
     # The three functions (FEATURES); off = no jobs, checks or endpoints for it
     enable_doors: bool
@@ -415,6 +444,7 @@ class Settings:
             doors = _link_door_cameras(doors, cameras)
         return cls(
             facility_id=_required("FACILITY_ID"),
+            device_mac=_device_mac(),
             enable_doors=doors_on,
             enable_camera=camera_on,
             enable_odour=odour_on,

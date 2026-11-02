@@ -23,7 +23,7 @@ Open http://127.0.0.1:8091/ for a live dashboard of what the Pi sent.
 
 Implements the contract in README.md section 8, with the default paths:
 
-    GET  /api/facility/tokens?facility=<id>   tokens + authCode (+ cameraDoors: --camera-doors)
+    GET  /api/facility/tokens?facility=<id>&mac=<mac>   tokens + authCode (+ cameraDoors: --camera-doors)
     POST /api/facility/sensor                 sensor readings
     POST /api/facility/door-event             access log
     POST /api/facility/alert                  anomalies
@@ -186,7 +186,9 @@ def create_app(key="dummy-key", tokens=DEFAULT_TOKENS, auth_code="dummy-auth-cod
         facility = request.args.get("facility")
         if not facility:
             return jsonify(error="facility query parameter required"), 400
-        say(f"pull tokens for {facility}: {len(st.tokens)} tokens")
+        mac = request.args.get("mac")
+        say(f"pull tokens for {facility}" + (f" (MAC {mac})" if mac else " (no MAC)")
+            + f": {len(st.tokens)} tokens")
         body = dict(facilityId=facility, authCode=st.auth_code,
                     tokens=[{"token": t, "expiresAt": None} for t in st.tokens])
         if camera_doors:   # the admin panel's camera -> doors links

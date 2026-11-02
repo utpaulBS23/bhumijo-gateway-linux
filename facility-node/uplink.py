@@ -70,6 +70,14 @@ class Uplink:
     def _url(self, path):
         return f"{self.s.admin_url}{path}"
 
+    def pull_params(self):
+        """Query of the settings pull: the facility, plus this Pi's MAC so the
+        backend can tell which registered device (Device List) is asking."""
+        params = {"facility": self.s.facility_id}
+        if self.s.device_mac:
+            params["mac"] = self.s.device_mac
+        return params
+
     # ---- push -------------------------------------------------------------
 
     def enqueue(self, kind, payload):
@@ -161,7 +169,7 @@ class Uplink:
         """Refresh token cache + Auth Code. On any failure the cache is kept."""
         try:
             resp = self.session.get(
-                self._url(self.s.tokens_path), params={"facility": self.s.facility_id},
+                self._url(self.s.tokens_path), params=self.pull_params(),
                 headers=self._headers(), timeout=self.timeout)
             resp.raise_for_status()
             body = resp.json()

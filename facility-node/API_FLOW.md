@@ -247,7 +247,7 @@ POST SENSOR_PATH
 The Pi pulls its settings every 5 minutes (and at start). This is how office staff change things without touching the Pi.
 
 ```http
-GET TOKENS_PATH?facility=facility-001
+GET TOKENS_PATH?facility=facility-001&mac=2c:cf:67:01:a7:ea
 Authorization: Bearer <ADMIN_KEY>
 ```
 
@@ -257,6 +257,8 @@ Authorization: Bearer <ADMIN_KEY>
  "tokens": [{"token": "abc…", "expiresAt": "2026-11-01T00:00:00Z"}],
  "cameraDoors": {"entry": ["male", "female"]}}
 ```
+
+`mac` is the Pi's MAC address (`DEVICE_MAC` in `.env`, default the eth0 MAC printed by `facility doctor`). The backend can match it with the **MAC** in the admin panel's Device List, to know which registered device is asking (and refuse one that isn't registered for this facility).
 
 | Field | Used for | If missing |
 |---|---|---|

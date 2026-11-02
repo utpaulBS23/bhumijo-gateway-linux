@@ -72,6 +72,7 @@ Sections 1–3 are shared by all three functions. Follow the steps in order. Eac
 | Facility ID | Admin backend | all |
 | Admin API URL + key | Backend team | all |
 | Facility-app Auth Code (= Device Auth Code, `DEVICE_AUTH_CODE`) | Admin backend, Device List (per facility) | door |
+| Pi MAC address, to type into the Device List (the backend matches it on every settings pull) | `facility doctor` ("MAC …", eth0's) or `cat /sys/class/net/eth0/address` | all |
 | Camera username + password (Imou: Safety Code) | Camera label / app | camera |
 | 2.4 GHz WiFi name + password | Router | odour (ESP32 board) |
 
