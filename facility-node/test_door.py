@@ -11,7 +11,7 @@ from dataclasses import replace
 
 import requests
 
-from app import FailureLimiter, create_app
+from app import FailureLimiter, create_app, scanner_message
 from config import ConfigError, DoorSpec, Settings
 from camera.camera import frames_differ
 from door import DoorController
@@ -156,8 +156,9 @@ class DoorTests(unittest.TestCase):
         self.assertEqual(door.qr("good"), "opened")
         self.assertEqual(relay.fired, [1])
         ev = up.of("door_event")[0]
-        self.assertEqual((ev["type"], ev["source"], ev["facility"]),
-                         ("entry", "qr", "facility-001"))
+        self.assertEqual((ev["type"], ev["door"], ev["facility"]),
+                         ("entry", "main", "facility-001"))
+        self.assertNotIn("source", ev)   # the backend knows how each type happens
 
     def test_invalid_qr_denied_and_door_stays_locked(self):
         door, relay, up, _, _ = make_door()
@@ -238,7 +239,7 @@ class DoorTests(unittest.TestCase):
                          ["snap.jpg", "snap.jpg", "snap.jpg", None])
         self.assertEqual(alerts[-1]["duration_s"], 680)
         self.assertEqual(up.of("door_event")[-1],
-                         {"facility": "facility-001", "section": "main", "type": "door_closed",
+                         {"facility": "facility-001", "door": "main", "type": "door_closed",
                           "ts": up.of("door_event")[-1]["ts"], "duration_s": 680})
 
     def test_short_open_sends_no_propped_alerts(self):
@@ -362,6 +363,282 @@ class DeviceMacTests(unittest.TestCase):
             finally:
                 if old is not None:
                     os.environ["DEVICE_MAC"] = old
+
+
+DOOR_IDS = {**TWO_DOORS, "DOOR_MALE_ID": "BHU-001", "DOOR_FEMALE_ID": "BHU-002"}
+PRICES = {"BHU-001": {"name": "Gents Toilet", "price": 10},
+          "BHU-002": {"name": "Ladies Toilet", "price": 15}}
+
+
+def priced_doors(env=None, prices=PRICES, **kw):
+    """Two doors linked to backend ids, with names and prices from a settings pull."""
+    from door.info import DoorInfo
+    doors, relay, up, clock, store = make_doors({**DOOR_IDS, **(env or {})}, **kw)
+    if prices is not None:
+        store.set_cred("door_info", json.dumps(prices))
+    info = DoorInfo(doors[0].s, store)
+    for d in doors:
+        d.info = info
+    return doors, relay, up, clock, store
+
+
+class DoorIdTests(unittest.TestCase):
+    """Backend door ids (DOOR_<NAME>_ID) with the admin panel's names and prices."""
+
+    def test_config(self):
+        s = settings(DOOR_IDS)
+        self.assertEqual([d.door_id for d in s.doors], ["BHU-001", "BHU-002"])
+        self.assertIsNone(settings(TWO_DOORS).doors[0].door_id)
+        with self.assertRaises(ConfigError):
+            settings({**DOOR_IDS, "DOOR_FEMALE_ID": "BHU-001"})
+        for bad in ("has space", "D-1021", "BHU-", "BHU-12a"):
+            with self.assertRaises(ConfigError, msg=bad):
+                settings({**DOOR_IDS, "DOOR_MALE_ID": bad})
+        self.assertEqual(settings({**DOOR_IDS, "DOOR_MALE_ID": "bhu-007"}).doors[0].door_id,
+                         "BHU-007")
+
+    def test_pull_stores_doors_and_keeps_them_when_missing(self):
+        from door.info import DoorInfo
+        s = settings(DOOR_IDS)
+        store, http = Store(":memory:"), FakeSession()
+        up, info = Uplink(s, store, session=http), DoorInfo(s, store)
+        http.get_resp = FakeResp(200, {"facilityId": "facility-001", "doors": PRICES})
+        self.assertTrue(up.pull_tokens())
+        self.assertEqual(info.get("male"), {"name": "Gents Toilet", "price": 10})
+        http.get_resp = FakeResp(200, {"facilityId": "facility-001"})
+        self.assertTrue(up.pull_tokens())
+        self.assertEqual(info.get("female"), {"name": "Ladies Toilet", "price": 15})
+
+    def test_unknown_ids_and_bad_prices_ignored(self):
+        doors, *_ = priced_doors(prices={
+            "BHU-999": {"name": "Elsewhere", "price": 5},
+            "BHU-001": {"name": "Gents", "price": -3},
+            "BHU-002": {"name": "  ", "price": True}})
+        self.assertEqual(doors[0].details(), {"name": "Gents", "price": None})
+        self.assertEqual(doors[1].details(), {"name": None, "price": None})
+
+    def test_events_and_alerts_carry_id_and_name(self):
+        (male, female), relay, up, clock, _ = priced_doors()
+        male.qr("good")
+        female.door_opened()
+        ev, alert = up.of("door_event")[0], up.of("alert")[0]
+        self.assertEqual(ev["door"], "BHU-001")
+        self.assertFalse({"section", "source", "door_id", "door_name"} & set(ev))
+        self.assertEqual((alert["door"], "section" in alert, alert["subtype"]),
+                         ("BHU-002", False, "forced_open"))
+        self.assertNotIn("price", ev)   # a cached code is not a paid entry
+
+    def test_no_id_no_fields(self):
+        door, _, up, _, _ = make_door()
+        door.qr("good")
+        self.assertEqual(up.of("door_event")[0]["door"], "main")   # no id yet: the Pi's name
+
+    def test_cash_sale_amount_from_price(self):
+        (male, _), _, up, _, _ = priced_doors()
+        male.facility_open("auth-code-123", use="customer")
+        male.facility_open("auth-code-123", use="customer", amount=10.0)
+        male.facility_open("auth-code-123", use="customer", amount=5.0)
+        male.facility_open("auth-code-123", use="personal", purpose="cleaning")
+        evs = up.of("door_event")
+        self.assertEqual((evs[0]["amount"], evs[0]["price"]), (10, 10))
+        self.assertNotIn("price_mismatch", evs[1])
+        self.assertEqual((evs[2]["amount"], evs[2]["price"], evs[2]["price_mismatch"]),
+                         (5.0, 10, True))
+        self.assertFalse({"price", "amount"} & set(evs[3]))
+        self.assertEqual(len(evs), 4)   # a mismatch still opens
+
+    def test_cash_sale_without_price_as_typed(self):
+        (male, _), _, up, _, _ = priced_doors(prices=None)
+        male.facility_open("auth-code-123", use="customer")
+        self.assertFalse({"amount", "price"} & set(up.of("door_event")[0]))
+
+    def test_qr_api_sends_door_id_and_entry_has_price(self):
+        from door.qr_api import QRValidator
+        (male, _), relay, up, _, _ = priced_doors({"QR_API_URL": "/qr/validate",
+                                                   "QR_API_ORDER": "api_only"})
+        sess = StubQRSession(lambda d: FakeResp(200, {"allowed": True}))
+        male.qr_api = QRValidator(male.s, session=sess)
+        self.assertEqual(male.qr_scan("paid"), ("opened", None, 10))
+        body = sess.calls[0][2]
+        self.assertEqual((body["door"], body["facility"], "door_id" in body),
+                         ("BHU-001", "facility-001", False))
+        self.assertEqual(up.of("door_event")[0]["price"], 10)
+        # the scanner repeating the code is the same scan: no new charge shown
+        self.assertEqual(male.qr_scan("paid"), ("opened", None, None))
+
+    def test_scanner_shows_price(self):
+        env = {"SCANNER_MSG_OPENED": "Please enter {door}, {price} Tk charged"}
+        s = settings(env)
+        self.assertEqual(scanner_message(s, "opened", None, 10, "Gents Toilet"),
+                         "Please enter Gents Toilet, 10 Tk charged")
+        self.assertEqual(scanner_message(s, "opened", None, 12.5, None),
+                         "Please enter , 12.5 Tk charged")
+        # price unknown (not charged): the plain default, never "{price}"
+        self.assertEqual(scanner_message(s, "opened", None), "Please Enter the facility")
+        self.assertEqual(scanner_message(settings(), "opened", None, 10), "Please Enter the facility")
+
+    def test_facility_doors_endpoint(self):
+        doors, _, _, _, store = priced_doors()
+        s = doors[0].s
+        c = create_app(s, doors, store, Uplink(s, store, session=FakeSession()),
+                       limiter=FailureLimiter(max_failures=2)).test_client()
+        r = c.get("/facility/doors", headers={"X-Auth-Code": "auth-code-123"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json["doors"][0], {"door": "male", "door_id": "BHU-001",
+                                              "name": "Gents Toilet", "price": 10, "open": False})
+        self.assertEqual(c.get("/facility/doors", headers={"X-Auth-Code": "wrong"}).status_code, 403)
+        self.assertEqual(c.get("/facility/doors?authCode=auth-code-123").status_code, 403)
+        self.assertEqual(c.get("/facility/doors",
+                               headers={"X-Auth-Code": "auth-code-123"}).status_code, 429)
+
+    def test_facility_open_by_door_id(self):
+        doors, relay, up, _, store = priced_doors()
+        s = doors[0].s
+        c = create_app(s, doors, store, Uplink(s, store, session=FakeSession())).test_client()
+        r = c.post("/facility/open", json={"authCode": "auth-code-123", "door": "BHU-002"})
+        self.assertEqual((r.status_code, r.json["door"], relay.fired), (200, "female", [2]))
+
+    def test_camera_links_by_door_id(self):
+        from camera.camera import Camera, CameraLinks
+        s = settings({**DOOR_IDS, **CAMS})
+        store = Store(":memory:")
+        store.set_cred("camera_doors", json.dumps({"entry": ["BHU-001", "BHU-002"]}))
+        links = CameraLinks(s, [Camera(s, c) for c in s.cameras], store, FakeUplink())
+        self.assertEqual(links.links(), ({"male": "entry", "female": "entry"}, "admin"))
+
+
+class FakeArp:
+    def __init__(self, table=None):
+        self.table = dict(table or {})
+        self.touched = []
+
+    def __call__(self):
+        return dict(self.table)
+
+    def touch(self, ip, port):
+        self.touched.append((ip, port))
+
+
+RELAY_MAC = "aa:bb:cc:00:01:74"
+
+
+class MacGuardTests(unittest.TestCase):
+    """Every LAN device is checked against its .env MAC (netcheck.MacGuard)."""
+
+    def guard(self, table, env=None):
+        from netcheck import MacGuard, devices_from_settings
+        s = settings({**TWO_DOORS, "RELAY_URL": "http://192.168.10.174",
+                      "RELAY_MAC": RELAY_MAC.upper(), **(env or {})})
+        arp, up, clock = FakeArp(table), FakeUplink(), Clock()
+        g = devices_from_settings(MacGuard(s, up, arp=arp, touch=arp.touch, clock=clock), s)
+        return g, arp, up, clock
+
+    def test_mac_settings(self):
+        s = settings({"RELAY_MAC": "AA-BB-CC-00-01-74", "SENSOR_MAC": "aa:bb:cc:00:01:05",
+                      **TWO_DOORS, "DOOR_MALE_SCANNER_MACS": "aa:bb:cc:00:01:01"})
+        self.assertEqual(s.relay_macs, (RELAY_MAC,))
+        self.assertEqual(s.doors[0].scanner_macs, ("aa:bb:cc:00:01:01",))
+        for bad in ({"RELAY_MAC": "aa:bb"}, {"CAM_HOST": "1.2.3.4", "CAM_MAC": "zz:zz:zz:zz:zz:zz"}):
+            with self.assertRaises(ConfigError, msg=bad):
+                settings(bad)
+
+    def test_arp_table_parse(self):
+        from netcheck import arp_table
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write("IP address       HW type     Flags       HW address            Mask     Device\n"
+                    "192.168.10.174   0x1         0x2         AA:BB:CC:00:01:74     *        wlan0\n"
+                    "192.168.10.102   0x1         0x0         00:00:00:00:00:00     *        wlan0\n")
+        self.addCleanup(os.remove, f.name)
+        self.assertEqual(arp_table(f.name), {"192.168.10.174": RELAY_MAC})
+        self.assertEqual(arp_table(f.name + ".missing"), {})
+
+    def test_match_passes_mismatch_blocks_and_alerts_once(self):
+        g, arp, up, clock = self.guard({"192.168.10.174": RELAY_MAC})
+        self.assertTrue(g.check("relay"))
+        arp.table["192.168.10.174"] = "de:ad:be:ef:00:01"
+        self.assertFalse(g.check("relay"))
+        self.assertFalse(g.check("relay"))
+        alerts = up.of("alert")
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual({k: alerts[0][k] for k in ("subtype", "device", "ip", "seen", "expected")},
+                         {"subtype": "device_mismatch", "device": "relay", "ip": "192.168.10.174",
+                          "seen": "de:ad:be:ef:00:01", "expected": [RELAY_MAC]})
+        clock.advance(601)
+        g.check("relay")
+        self.assertEqual(len(up.of("alert")), 2)
+        self.assertEqual(g.state()["relay"]["ok"], False)
+
+    def test_no_arp_entry_touches_then_blocks(self):
+        g, arp, up, _ = self.guard({})
+        self.assertFalse(g.check("relay"))
+        self.assertEqual(arp.touched, [("192.168.10.174", 80)])
+        self.assertIsNone(up.of("alert")[0]["seen"])
+
+    def test_device_without_mac_is_reported_not_checked(self):
+        g, _, up, _ = self.guard({"192.168.10.101": "aa:bb:cc:00:01:01"})
+        self.assertTrue(g.check("scanner_male"))
+        self.assertEqual(g.state()["scanner_male"],
+                         {"ip": "192.168.10.101", "mac": "aa:bb:cc:00:01:01",
+                          "expected": None, "ok": None})
+        self.assertEqual(up.items, [])
+
+    def test_relay_never_sends_password_to_impostor(self):
+        from door.relay import Relay, RelayMacError
+        g, arp, _, _ = self.guard({"192.168.10.174": "de:ad:be:ef:00:01"})
+        sess = FakeSession()
+        sess.get = lambda *a, **k: self.fail("relay password sent to the wrong device")
+        relay = Relay("http://192.168.10.174", "relay-secret", session=sess,
+                      verify=g.verifier("relay"))
+        with self.assertRaises(RelayMacError):
+            relay.fire(1, hold=5)
+        with self.assertRaises(RelayMacError):
+            relay.read_inputs()
+
+    def test_scanner_with_wrong_mac_refused(self):
+        g, arp, up, _ = self.guard({"192.168.10.101": "de:ad:be:ef:00:01",
+                                    "192.168.10.102": "aa:bb:cc:00:01:02"},
+                                   env={"DOOR_MALE_SCANNER_MACS": "aa:bb:cc:00:01:01",
+                                        "DOOR_FEMALE_SCANNER_MACS": "aa:bb:cc:00:01:02"})
+        doors, relay, dup, _, store = make_doors({**TWO_DOORS, "DOOR_MALE_SCANNER_MACS": "aa:bb:cc:00:01:01",
+                                                 "DOOR_FEMALE_SCANNER_MACS": "aa:bb:cc:00:01:02"})
+        s = doors[0].s
+        c = create_app(s, doors, store, Uplink(s, store, session=FakeSession()), guard=g).test_client()
+        r = c.post("/qr", json={"token": "good"}, environ_base={"REMOTE_ADDR": "192.168.10.101"})
+        self.assertEqual((r.status_code, r.json["reason"]), (403, "device_mismatch"))
+        r = c.post("/qr", json={"token": "good"}, environ_base={"REMOTE_ADDR": "192.168.10.102"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(relay.fired, [2])
+        self.assertEqual(up.of("alert")[0]["door"], "male")
+        h = c.get("/health").json
+        self.assertEqual(h["devices"]["scanner_male"]["ok"], False)
+
+    def test_camera_with_wrong_mac_gets_no_login(self):
+        from camera.camera import Camera
+        s = settings({"CAM_HOST": "192.168.10.149", "CAM_RTSP": "rtsp://u:p@192.168.10.149/s",
+                      "CAM_MAC": "aa:bb:cc:00:01:49"})
+        cam = Camera(s, s.cameras[0], verify=lambda: False)
+        self.assertIsNone(cam.snapshot())
+        cam.frame_check()
+        cam.probe()
+        st = cam.snapshot_status()
+        self.assertEqual((st["reachable"], st["mac_ok"]), (False, False))
+
+    def test_sensor_board_with_wrong_mac_reads_nulls(self):
+        from odour.sensors import HttpSensors
+        sess = FakeSession()
+        sess.get = lambda *a, **k: self.fail("sensor board asked despite wrong MAC")
+        b = HttpSensors("http://192.168.10.105/data", session=sess, verify=lambda: False)
+        self.assertEqual(set(b.read().values()), {None})
+
+    def test_set_env_keys(self):
+        from netcheck import set_env_keys
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write("# RELAY_MAC=old comment\nRELAY_MAC=\nFACILITY_ID=x\n")
+        self.addCleanup(os.remove, f.name)
+        set_env_keys(f.name, {"RELAY_MAC": RELAY_MAC, "SENSOR_MAC": "aa:bb:cc:00:01:05"})
+        with open(f.name) as fh:
+            self.assertEqual(fh.read(), "# RELAY_MAC=old comment\nRELAY_MAC=" + RELAY_MAC +
+                             "\nFACILITY_ID=x\nSENSOR_MAC=aa:bb:cc:00:01:05\n")
 
 
 class EventIdTests(unittest.TestCase):
@@ -555,7 +832,7 @@ class TwoDoorTests(unittest.TestCase):
         r = self.scan("192.168.10.102")
         self.assertEqual((r.status_code, r.json["door"]), (200, "female"))
         self.assertEqual(self.relay.fired, [1, 2])
-        self.assertEqual([(e["section"], e["type"]) for e in self.up.of("door_event")],
+        self.assertEqual([(e["door"], e["type"]) for e in self.up.of("door_event")],
                          [("male", "entry"), ("female", "entry")])
 
     def test_any_valid_token_opens_either_door(self):
@@ -570,7 +847,7 @@ class TwoDoorTests(unittest.TestCase):
     def test_bad_token_denied_at_its_door(self):
         r = self.scan("192.168.10.102", token="nope")
         self.assertEqual(r.status_code, 403)
-        self.assertEqual(self.up.of("door_event")[0]["section"], "female")
+        self.assertEqual(self.up.of("door_event")[0]["door"], "female")
 
     def test_facility_app_must_name_door(self):
         r = self.c.post("/facility/open", json={"authCode": "auth-code-123"})
@@ -586,7 +863,7 @@ class TwoDoorTests(unittest.TestCase):
         self.male.door_opened()       # legit: male trigger
         self.female.door_opened()     # no female trigger -> forced
         alerts = self.up.of("alert")
-        self.assertEqual([(a["section"], a["subtype"]) for a in alerts],
+        self.assertEqual([(a["door"], a["subtype"]) for a in alerts],
                          [("female", "forced_open")])
 
     def test_exit_inputs_routed_per_door(self):
@@ -603,7 +880,7 @@ class TwoDoorTests(unittest.TestCase):
                 return [False, True, False, False]   # Input02 = female exit
 
         run_exit_poller(replace(self.male.s, exit_poll_interval=0), R(), self.doors, stop)
-        self.assertEqual([(e["section"], e["type"]) for e in self.up.of("door_event")],
+        self.assertEqual([(e["door"], e["type"]) for e in self.up.of("door_event")],
                          [("female", "exit")])
 
     def test_known_scanner_never_rate_limited(self):
@@ -697,7 +974,7 @@ class LocalCodeTests(unittest.TestCase):
         store.add_local_token("fn-local-test-code-123", "test", clock() + 3600)
         store.replace_tokens([])   # backend pull wipes backend tokens only
         self.assertEqual(door.qr("fn-local-test-code-123"), "opened")
-        self.assertEqual(up.of("door_event")[0]["source"], "qr_local")
+        self.assertNotIn("scan_id", up.of("door_event")[0])   # never asked the backend
 
     def test_local_code_expires(self):
         door, _, _, clock, store = make_door()
@@ -705,10 +982,10 @@ class LocalCodeTests(unittest.TestCase):
         clock.advance(61)
         self.assertEqual(door.qr("fn-local-test-code-123"), "denied")
 
-    def test_backend_token_source_is_qr(self):
+    def test_backend_token_is_an_entry(self):
         door, _, up, _, _ = make_door()
         door.qr("good")
-        self.assertEqual(up.of("door_event")[0]["source"], "qr")
+        self.assertEqual(up.of("door_event")[0]["type"], "entry")
 
     def test_qr_tool_create_list_revoke(self):
         import contextlib
@@ -1164,7 +1441,7 @@ class CameraConfigTests(unittest.TestCase):
         doors, _, up, _, _ = make_doors({**TWO_DOORS, **CAMS, "CAM_ENTRY_DOORS": "female"})
         for d in doors:
             d.door_opened()
-        self.assertEqual({a["section"]: a["camera"] for a in up.of("alert")},
+        self.assertEqual({a["door"]: a["camera"] for a in up.of("alert")},
                          {"male": "male", "female": "entry"})
 
     def test_health_lists_every_camera(self):
@@ -1349,12 +1626,12 @@ class QRApiDoorTests(unittest.TestCase):
     def test_local_first_cached_token_skips_api(self):
         d, relay, up, sess = self.door([])
         self.assertEqual(d.qr("cached"), "opened")
-        self.assertEqual((sess.calls, up.of("door_event")[0]["source"]), ([], "qr"))
+        self.assertEqual((sess.calls, "scan_id" in up.of("door_event")[0]), ([], False))
 
     def test_local_first_unknown_token_asks_api(self):
         d, relay, up, sess = self.door(["allow", "deny", "down"])
         self.assertEqual(d.qr("new-ticket"), "opened")
-        self.assertEqual(up.of("door_event")[0]["source"], "qr_api")
+        self.assertIn("scan_id", up.of("door_event")[0])
         self.assertEqual(d.qr("bad"), "denied")
         self.assertEqual(d.qr("whatever"), "denied")
         self.assertEqual([e.get("reason") for e in up.of("door_event")[1:]],
@@ -1374,7 +1651,7 @@ class QRApiDoorTests(unittest.TestCase):
     def test_api_first_allow(self):
         d, _, up, _ = self.door(["allow"], order="api_first")
         self.assertEqual(d.qr("fresh"), "opened")
-        self.assertEqual(up.of("door_event")[0]["source"], "qr_api")
+        self.assertIn("scan_id", up.of("door_event")[0])
 
     def test_pi_made_codes_never_hit_api(self):
         for order in ("local_first", "api_first"):
@@ -1495,8 +1772,8 @@ class PaidEntryTests(unittest.TestCase):
         _, _, body, headers, _ = sess.calls[0]
         ev = up.of("door_event")[0]
         self.assertTrue(body["scan_id"])
-        self.assertEqual((headers["Idempotency-Key"], ev["scan_id"], ev["source"]),
-                         (body["scan_id"], body["scan_id"], "qr_api"))
+        self.assertEqual((headers["Idempotency-Key"], ev["scan_id"]),
+                         (body["scan_id"], body["scan_id"]))
 
     def test_no_balance_denied_with_reason(self):
         d, relay, up, _, _ = self.door([
@@ -1681,7 +1958,7 @@ class DummyBackendTests(unittest.TestCase):
     def test_missing_fields_422_and_dedupe(self):
         r = self.c.post("/api/facility/door-event", json={"id": "1", "facility": "f"}, headers=self.H)
         self.assertEqual(r.status_code, 422)
-        ev = {"id": "e1", "facility": "f", "section": "male", "type": "entry", "ts": "t"}
+        ev = {"id": "e1", "facility": "f", "door": "BHU-001", "type": "entry", "ts": "t"}
         self.assertFalse(self.c.post("/api/facility/door-event", json=ev, headers=self.H).json["duplicate"])
         self.assertTrue(self.c.post("/api/facility/door-event", json=ev, headers=self.H).json["duplicate"])
         state = self.c.get("/admin/state").json
@@ -1901,15 +2178,19 @@ class AttendantUseTests(unittest.TestCase):
 
     def test_personal_with_purpose(self):
         for purpose in ("cleaning", "Bath", "toilet", "maintenance"):
-            self.assertEqual(self.open(use="personal", purpose=purpose).status_code, 200, purpose)
+            self.assertEqual(self.open(use="personal", purpose=purpose, attendant="Rahim").status_code,
+                             200, purpose)
         evs = self.up.of("door_event")
         self.assertEqual([e["purpose"] for e in evs], ["cleaning", "bath", "toilet", "maintenance"])
         self.assertTrue(all(e["use"] == "personal" and "payment" not in e for e in evs))
+        self.assertEqual({(e["door"], e["attendant"]) for e in evs}, {("male", "Rahim")})
 
     def test_bad_requests_open_nothing(self):
         for body, why in (({"use": "friend"}, "bad_use"),
                           ({"use": "personal"}, "bad_purpose"),
                           ({"use": "personal", "purpose": "party"}, "bad_purpose"),
+                          ({"use": "personal", "purpose": "bath"}, "no_attendant"),
+                          ({"use": "personal", "purpose": "bath", "attendant": "  "}, "no_attendant"),
                           ({"use": "customer", "amount": "ten"}, "bad_amount"),
                           ({"use": "customer", "amount": -5}, "bad_amount")):
             r = self.open(**body)
@@ -1918,15 +2199,17 @@ class AttendantUseTests(unittest.TestCase):
 
     def test_headers_and_older_app(self):
         r = self.c.post("/facility/open", headers={"X-Auth-Code": "auth-code-123", "X-Door": "female",
-                                                    "X-Use": "personal", "X-Purpose": "cleaning"})
+                                                    "X-Use": "personal", "X-Purpose": "cleaning",
+                                                    "X-Attendant": "Rahim"})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(self.open().status_code, 200, "an app that sends no use still opens")
         a, b = self.up.of("door_event")
-        self.assertEqual((a["section"], a["purpose"], "use" in b), ("female", "cleaning", False))
+        self.assertEqual((a["door"], a["purpose"], "use" in b), ("female", "cleaning", False))
 
     def test_wrong_code_still_denied(self):
         r = self.c.post("/facility/open", json={"authCode": "nope", "door": "male",
-                                                 "use": "personal", "purpose": "bath"})
+                                                 "use": "personal", "purpose": "bath",
+                                                 "attendant": "Rahim"})
         self.assertEqual(r.status_code, 403)
         self.assertEqual(self.relay.fired, [])
 

@@ -19,6 +19,8 @@ facility <command>
                     fn = door | camera | odour to check just that one
   feature [fn on|off]  the three functions: show, or switch one on/off
                     e.g.  facility feature camera off
+  macs [save]       MAC of every LAN device (relay, scanners, cameras, sensor board);
+                    save = write them to .env as the expected MACs (asks first)
   door [delay d s]  door unlock times: show, or set one
                     e.g.  facility door delay male 8   (1-30 s; "all" for every door)
   start|stop|restart
@@ -53,6 +55,12 @@ case "$cmd" in
     qr)      as_facility -m door.qr_tool "$@" ;;
     mq)      as_facility -m odour.mq "$@" ;;
     feature) sudo bash "$DIR/deploy/feature.sh" "$@" ;;
+    macs)
+        if [ "${1:-}" = save ]; then
+            (cd "$DIR" && sudo "$PY" netcheck.py save) && sudo systemctl restart "$SVC" && echo "restarted"
+        else
+            as_facility netcheck.py show
+        fi ;;
     door)    sudo bash "$DIR/deploy/door-setup.sh" "$@" ;;
     camera)  sudo bash "$DIR/deploy/camera-setup.sh" "$@" ;;
     sensor)  bash "$DIR/deploy/sensor-setup.sh" "$@" ;;   # sudo only inside, for .env

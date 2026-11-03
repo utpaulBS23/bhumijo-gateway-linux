@@ -286,10 +286,14 @@ ENABLE_DOORS=1
 RELAY_URL=http://192.168.10.174
 RELAY_PWD=<the board's POST_PASSWORD>
 DOORS=male,female
+# the backend device id of each door (BHU-<number>, from the admin panel);
+# its name and price come by it
+DOOR_MALE_ID=BHU-001
 DOOR_MALE_RELAY=1
 DOOR_MALE_EXIT_INPUT=0
 DOOR_MALE_REED_GPIO=27
 DOOR_MALE_SCANNER_IPS=192.168.10.101
+DOOR_FEMALE_ID=BHU-002
 DOOR_FEMALE_RELAY=2
 DOOR_FEMALE_EXIT_INPUT=1
 DOOR_FEMALE_REED_GPIO=22
@@ -311,7 +315,16 @@ facility door delay all 5       # every door
 
 It saves the time, restarts the service and shows the new value. It never fires a relay: check it with a real scan.
 
-✅ **Check:** `facility doctor door` shows both doors with their unlock time, `reachable, password accepted` and `unlock time supported` for the relay, and `0 problem(s)`.
+✅ **Check:** `facility doctor door` shows both doors with their id and unlock time, `reachable, password accepted` and `unlock time supported` for the relay, and `0 problem(s)`. Once the backend sends `doors`, `facility health` shows each door's `name` and `price`.
+
+**Device MACs (security).** With every device installed and working, on site:
+
+```bash
+facility macs            # the MAC seen for the relay, each scanner, camera, sensor board
+facility macs save       # write them to .env as RELAY_MAC, DOOR_*_SCANNER_MACS, CAM_MAC, SENSOR_MAC
+```
+
+Save only when you're sure each IP is the real device (nothing else plugged in), and when every device answers: one that is offline is skipped, so run it again once it's back. From then on a different device on one of those IPs is blocked and raises a `device_mismatch` alert. **After replacing a device** (new relay board, scanner or camera), run `facility macs save` again, or that device stays blocked: `facility doctor` shows it as `✗ … MAC … expected …`.
 
 ### 4.4 QR scanners
 
@@ -358,7 +371,7 @@ Change the texts in `.env` (e.g. to Bangla). Keep them short, and use plain Lati
 ### 4.5 Unlock QR codes (test, staff, commissioning)
 
 User QR codes come from the admin backend automatically. Use `facility qr` for codes made **on the Pi**, such as a test code for commissioning, or codes for cleaners and staff.
-Any valid code opens **either** door. Pi-made codes show up in the access log as `source: qr_local`.
+Any valid code opens **either** door. Pi-made codes show up in the access log as an `entry` without `scan_id`.
 
 ```bash
 facility qr create --label test                          # 1 code, valid 24 h
@@ -474,7 +487,7 @@ Then show the codes at a scanner:
 
 | QR image (`dev/qr/`) | Expected |
 |---|---|
-| `DUMMY-ALLOW-0001.png` | Door opens; dummy prints `ALLOW`; log `source: qr_api` |
+| `DUMMY-ALLOW-0001.png` | Door opens; dummy prints `ALLOW`; the `entry` has a `scan_id` |
 | `DUMMY-DENY-0001.png` | Stays locked; dummy prints `DENY`; `reason: api_denied` |
 | Any of them, with the dummy stopped (Ctrl-C) | Stays locked; the log shows `QR API unavailable … using local cache` |
 
@@ -525,7 +538,7 @@ Run every test for **both doors**. Tick each column.
 |---|---|---|---|---|
 | D1 | `curl sw_ctl.cgi … RelayNN=ON` | Only this door releases | ☐ | ☐ |
 | D2 | Hold exit button, `curl input_ctl.cgi` | Only this door's `InputNN=ON` | ☐ | ☐ |
-| D3 | Show a valid QR (section 4.5) | This door opens for its unlock time (time it); `entry` logged with `section` | ☐ | ☐ |
+| D3 | Show a valid QR (section 4.5) | This door opens for its unlock time (time it); `entry` logged with this door's `door` id | ☐ | ☐ |
 | D4 | Show an invalid QR | Stays locked; `denied` logged | ☐ | ☐ |
 | D5 | Facility app open with `door` set | Only that door opens; `attendant` logged | ☐ | ☐ |
 | D5a | App: customer use (cash), then personal use for cleaning | Both open; logged with `use: customer, payment: cash` and `use: personal, purpose: cleaning` | ☐ | ☐ |
@@ -932,6 +945,7 @@ For one function, see its own table: door 4.9, camera 5.4, odour 6.6.
 - [ ] KC868 password is a long random value in `board_secrets.py` (not `Admin`)
 - [ ] Camera and WiFi passwords are not defaults and not shared in chat or tickets
 - [ ] `/opt/facility-node/.env` is `640 root:facility`
+- [ ] Device MACs saved (`facility macs save`); `facility doctor` shows every device's MAC matching
 - [ ] `DOOR_TEST_ENDPOINTS=0`
 - [ ] Test QR codes revoked (`qr list` shows none, or only staff codes with an expiry)
 - [ ] `QR_API_URL` is the real backend or empty, **not** the dummy (`127.0.0.1:8090`); the dummy is stopped

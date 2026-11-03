@@ -23,7 +23,8 @@ Open http://127.0.0.1:8091/ for a live dashboard of what the Pi sent.
 
 Implements the contract in README.md section 8, with the default paths:
 
-    GET  /api/facility/tokens?facility=<id>&mac=<mac>   tokens + authCode (+ cameraDoors: --camera-doors)
+    GET  /api/facility/tokens?facility=<id>&mac=<mac>   tokens + authCode (+ cameraDoors:
+                                              --camera-doors, doors: --doors)
     POST /api/facility/sensor                 sensor readings
     POST /api/facility/door-event             access log
     POST /api/facility/alert                  anomalies
@@ -65,7 +66,7 @@ DEFAULT_TOKENS = ["DUMMY-ALLOW-0001", "DUMMY-ALLOW-0002", "DUMMY-ALLOW-0003"]
 
 REQUIRED = {
     "sensor": {"id", "facility", "ts"},
-    "door_event": {"id", "facility", "section", "type", "ts"},
+    "door_event": {"id", "facility", "door", "type", "ts"},
     "alert": {"id", "facility", "type", "subtype", "ts"},
 }
 DOOR_TYPES = {"entry", "attendant", "exit", "denied", "door_closed", "relay_failed"}
@@ -106,7 +107,7 @@ class State:
 def create_app(key="dummy-key", tokens=DEFAULT_TOKENS, auth_code="dummy-auth-code",
                data_dir=os.path.join(HERE, "backend-data"), outage=False, quiet=False,
                balance=3, camera_doors=None, jabo=False,
-               device_auth_code="dummy-device-code"):
+               device_auth_code="dummy-device-code", doors=None):
     app = Flask("dummy_backend")
     st = State(tokens, auth_code, data_dir, balance)
     st.outage = outage
@@ -193,6 +194,8 @@ def create_app(key="dummy-key", tokens=DEFAULT_TOKENS, auth_code="dummy-auth-cod
                     tokens=[{"token": t, "expiresAt": None} for t in st.tokens])
         if camera_doors:   # the admin panel's camera -> doors links
             body["cameraDoors"] = camera_doors
+        if doors:          # each door's name and price, by backend door id
+            body["doors"] = doors
         return jsonify(body)
 
     def charge(token, scan_id):
@@ -218,7 +221,8 @@ def create_app(key="dummy-key", tokens=DEFAULT_TOKENS, auth_code="dummy-auth-cod
         token = data.get("token")
         scan_id = data.get("scan_id") or request.headers.get("Idempotency-Key")
         ok, reason, note = charge(token, scan_id)
-        say(f"QR validate {token!r} door={data.get('door')} scan={scan_id} -> "
+        say(f"QR validate {token!r} door={data.get('door')} door_id={data.get('door_id')} "
+            f"scan={scan_id} -> "
             f"{'ALLOW' if ok else 'DENY ' + str(reason)} {note}")
         if jabo:   # the backend ran /user/accesses for this door's service
             if ok:
@@ -273,8 +277,8 @@ border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--mute);font
 <h2>Sensor (latest first)</h2><div class="wrap"><table id="sensor"></table></div>
 <h2>Snapshots</h2><div class="wrap"><table id="snapshot"></table></div>
 <script>
-const cols={door_event:["received","ts","section","type","source","reason","duration_s"],
- alert:["received","ts","section","subtype","repeat","duration_s","metrics","snapshot"],
+const cols={door_event:["received","ts","door","type","reason","purpose","attendant","duration_s"],
+ alert:["received","ts","door","subtype","repeat","duration_s","metrics","snapshot"],
  sensor:["received","ts","tvoc","tvoc_score","tvoc_level","eco2","aqi","temperature","humidity","nh3_ppm","h2s_ppm","camera"],
  snapshot:["received","ts","name"]};
 const esc=v=>v==null?"":String(typeof v==="object"?JSON.stringify(v):v)
@@ -313,6 +317,9 @@ def main():
     p.add_argument("--balance", type=int, default=3, help="paid entries per code")
     p.add_argument("--camera-doors", type=json.loads, default=None,
                    help='admin panel camera links, e.g. \'{"entry": ["male", "female"]}\'')
+    p.add_argument("--doors", type=json.loads, default=None,
+                   help='door names and prices by backend door id, e.g. '
+                        '\'{"BHU-001": {"name": "Gents Toilet", "price": 10}}\'')
     p.add_argument("--jabo", action="store_true",
                    help="/api/qr/validate answers like the Jabo Khotai backend")
     p.add_argument("--device-auth-code", default="dummy-device-code",
@@ -325,7 +332,8 @@ def main():
           f"  data: {args.data}")
     create_app(args.key, tokens, args.auth_code, args.data, args.outage,
                balance=args.balance, camera_doors=args.camera_doors,
-               jabo=args.jabo, device_auth_code=args.device_auth_code).run(
+               jabo=args.jabo, device_auth_code=args.device_auth_code,
+               doors=args.doors).run(
         host=args.host, port=args.port, threaded=True)
 
 

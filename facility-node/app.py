@@ -6,8 +6,9 @@ LAN only. Never expose port 5454 to the internet.
     POST /api/device/code {token}            same as /qr, for scanners with that fixed path
     GET|POST /qrscanner   ?cardid=..         same, legacy scanner format + response
     POST /rakindaqrscanner {SCode}           same, Rakinda format + response
-    POST /facility/open   {authCode, door}   Facility app; door = section name
+    POST /facility/open   {authCode, door}   Facility app; door = section name or door id
                           + use: customer (cash, amount?) | personal (purpose), attendant?
+    GET  /facility/doors  X-Auth-Code        Facility app: each door's id, name, price, open
     POST /door/opened     ?door=<name>       bench test only (DOOR_TEST_ENDPOINTS=1)
     POST /door/closed     ?door=<name>       bench test only (DOOR_TEST_ENDPOINTS=1)
     GET  /health                             liveness + queue size
@@ -23,6 +24,7 @@ from collections import defaultdict, deque
 from flask import Flask, g, jsonify, request
 
 from camera.camera import camera_fields
+from config import SCANNER_MESSAGES
 
 log = logging.getLogger("app")
 
@@ -37,7 +39,8 @@ def attendant_fields(data, headers, purposes):
     """The Facility app's use / purpose / amount / attendant -> (fields, error).
 
     error is None, or why the request is refused (400): bad_use, bad_purpose,
-    bad_amount. An app that sends no `use` at all is accepted (older app).
+    bad_amount, no_attendant (personal use must say who). An app that sends no
+    `use` at all is accepted (older app).
     """
     def get(key, header):
         v = headers.get(header) if headers.get(header) is not None else data.get(key)
@@ -66,20 +69,32 @@ def attendant_fields(data, headers, purposes):
         fields["amount"] = amount
     if isinstance(attendant, (str, int)) and str(attendant).strip():
         fields["attendant"] = str(attendant).strip()[:64]
+    elif use == "personal":
+        return None, "no_attendant"
     return fields, None
 
 # Door endpoints, switched off with ENABLE_DOORS=0
-DOOR_ENDPOINTS = {"qr", "qrscanner", "rakinda", "facility_open", "door_opened", "door_closed"}
+DOOR_ENDPOINTS = {"qr", "qrscanner", "rakinda", "facility_open", "facility_doors",
+                  "door_opened", "door_closed"}
 
 # Backend refusal reasons that mean "top up your balance"
 NO_BALANCE = {"insufficient_balance", "insufficient_funds", "no_balance", "low_balance"}
 
 
-def scanner_message(settings, result, why):
-    """What the scanner should show the person, from the scan's result and reason."""
+def scanner_message(settings, result, why, price=None, door_name=None):
+    """What the scanner should show the person, from the scan's result and reason.
+
+    SCANNER_MSG_OPENED may hold {price} (what this scan was charged) and {door}
+    (the door's admin-panel name); without a known price the plain default is shown.
+    """
     msgs = settings.scanner_messages
     if result == "opened":
-        return msgs["opened"]
+        msg = msgs["opened"]
+        if "{price}" in msg:
+            if price is None:
+                return SCANNER_MESSAGES["opened"]
+            msg = msg.replace("{price}", f"{price:g}")
+        return msg.replace("{door}", door_name or "")
     if result == "relay_error":
         return msgs["error"]
     if why in NO_BALANCE:
@@ -160,11 +175,13 @@ class FailureLimiter:
 
 
 def create_app(settings, doors, store, uplink, cameras=(), limiter=None, odour=None,
-               qr_api=None, camera_links=None):
-    """doors: list of DoorController, one per section."""
+               qr_api=None, camera_links=None, guard=None):
+    """doors: list of DoorController, one per section. guard: netcheck.MacGuard."""
+    from netcheck import scanner_name
     app = Flask(__name__)
     limiter = limiter or FailureLimiter()
     by_name = {d.name: d for d in doors}
+    by_id = {d.door.door_id: d for d in doors if d.door.door_id}
     by_scanner = {ip: d for d in doors for ip in d.door.scanner_ips}
     # Single door with no scanner IPs configured: accept scans from anywhere
     any_scanner = doors[0] if len(doors) == 1 and not doors[0].door.scanner_ips else None
@@ -180,12 +197,16 @@ def create_app(settings, doors, store, uplink, cameras=(), limiter=None, odour=N
     def reply(result, door=None):
         extra = {"reason": g.bad_request} if "bad_request" in g else {}
         if "qr_why" in g:   # a scan: tell the scanner (and the person) why
-            extra = dict(reason=g.qr_why, message=scanner_message(settings, result, g.qr_why))
+            extra = dict(reason=g.qr_why, message=message(result, door))
         return (jsonify(ok=result == "opened", result=result,
                         door=door.name if door else None, **extra), STATUS[result])
 
+    def message(result, door):
+        name = door.details()["name"] if door is not None else None
+        return scanner_message(settings, result, g.get("qr_why"), g.get("qr_price"), name)
+
     def scan_qr(door, token):
-        result, g.qr_why = door.qr_detail(token)
+        result, g.qr_why, g.qr_price = door.qr_scan(token)
         return result
 
     def attempt(door, fn_name, value, **kw):
@@ -211,6 +232,11 @@ def create_app(settings, doors, store, uplink, cameras=(), limiter=None, odour=N
 
     def scan():
         door = by_scanner.get(request.remote_addr) or any_scanner
+        name = scanner_name(guard, request.remote_addr) if guard is not None else None
+        if name and not guard.check(name, request.remote_addr):
+            # Not the wired-in scanner (DOOR_<NAME>_SCANNER_MACS): logged and alerted
+            g.qr_why = "device_mismatch"
+            return "denied", door
         if door is None:
             log.warning("scan from unknown scanner %s", request.remote_addr)
         token = scanned_token(request)
@@ -228,7 +254,9 @@ def create_app(settings, doors, store, uplink, cameras=(), limiter=None, odour=N
     def named_door(name):
         if name is None and len(doors) == 1:
             return doors[0]
-        return by_name.get(str(name).strip().lower()) if name else None
+        if not name:
+            return None
+        return by_id.get(str(name).strip()) or by_name.get(str(name).strip().lower())
 
     @app.post("/qr")
     @app.post("/api/device/code")   # path some scanners' firmware posts to
@@ -244,12 +272,12 @@ def create_app(settings, doors, store, uplink, cameras=(), limiter=None, odour=N
         params = request.args.to_dict() or (request.get_json(silent=True) or {})
         return jsonify(status="success" if ok else "denied", data=[params],
                        access_granted=ok, door=door.name if door else None,
-                       message=scanner_message(settings, result, g.get("qr_why"))), 200
+                       message=message(result, door)), 200
 
     @app.post("/rakindaqrscanner")
     def rakinda():
-        result, _ = scan()
-        msg = scanner_message(settings, result, g.get("qr_why"))
+        result, door = scan()
+        msg = message(result, door)
         if result == "opened":
             return jsonify(ResultCode="1", Msg=msg, Audio="40"), 200
         return jsonify(ResultCode="0", Msg=msg, Audio="0"), 200
@@ -264,6 +292,21 @@ def create_app(settings, doors, store, uplink, cameras=(), limiter=None, odour=N
             g.bad_request = error
             return reply("bad_request")
         return unlock(door, "facility_open", code, **fields)
+
+    @app.get("/facility/doors")
+    def facility_doors():
+        """The Facility app's door buttons: id, admin-panel name and price, open.
+        Needs the Auth Code (header only: a query string would land in the log).
+        Works offline from the last settings pull."""
+        ip = request.remote_addr or "?"
+        if limiter.blocked(ip):
+            return jsonify(ok=False, result="rate_limited"), STATUS["rate_limited"]
+        if not doors[0].auth_code_ok(request.headers.get("X-Auth-Code")):
+            limiter.fail(ip)
+            return jsonify(ok=False, result="denied"), STATUS["denied"]
+        return jsonify(ok=True, doors=[
+            {"door": d.name, "door_id": d.door.door_id, **d.details(), "open": d.is_open}
+            for d in doors])
 
     if settings.door_test_endpoints:
         @app.post("/door/opened")
@@ -300,7 +343,9 @@ def create_app(settings, doors, store, uplink, cameras=(), limiter=None, odour=N
             last_flush=uplink.last_flush_ok,
             doors={d.name: {"open": d.is_open, "relay": d.door.relay,
                             "unlock_s": d.door.unlock_seconds,
-                            "scanners": list(d.door.scanner_ips)} for d in doors},
+                            "scanners": list(d.door.scanner_ips),
+                            "door_id": d.door.door_id, **d.details()} for d in doors},
+            devices=guard.state() if guard else None,
             reed=settings.reed,
             **camera_fields(cameras),
             camera_monitor=settings.cam_monitor if cameras else None,
@@ -318,7 +363,9 @@ def main():
     from camera.camera import Camera, CameraLinks, run_prune_loop
     from config import Settings
     from door import DoorController
+    from door.info import DoorInfo
     from door.inputs import ReedSwitch, run_door_ticker, run_exit_poller
+    from netcheck import MacGuard, devices_from_settings
     from door.qr_api import QRValidator, qr_auth_headers
     from door.relay import Relay
     from odour.monitor import OdourMonitor
@@ -338,12 +385,16 @@ def main():
         log.warning("ADMIN_URL points at this machine (%s): dummy backend? "
                     "Never leave this on in production", s.admin_url)
 
+    # Every LAN device is checked against its .env MAC before the Pi talks to it
+    guard = devices_from_settings(MacGuard(s, uplink), s)
     # Each function only builds its parts when it is switched on
-    relay = Relay(s.relay_url, s.relay_pwd) if s.enable_doors else None
-    cameras = [Camera(s, spec) for spec in s.cameras]   # empty when the camera function is off
+    relay = (Relay(s.relay_url, s.relay_pwd, verify=guard.verifier("relay"))
+             if s.enable_doors else None)
+    cameras = [Camera(s, spec, verify=guard.verifier(f"camera_{spec.name}"))
+               for spec in s.cameras]   # empty when the camera function is off
     links = CameraLinks(s, cameras, store, uplink) if cameras else None
     odour = OdourMonitor(s, uplink) if s.enable_odour else None
-    sensors = make_sensors(s) if s.enable_odour else None
+    sensors = make_sensors(s, verify=guard.verifier("sensor_board")) if s.enable_odour else None
     mq = MQSensors(s) if s.enable_odour and s.mq else None
     qr_api = None
     if s.enable_doors and s.qr_api_url:
@@ -352,9 +403,10 @@ def main():
             log.warning("QR_API_URL points at this machine (%s): dummy API? "
                         "Never leave this on in production", s.qr_api_url)
     # Each door's alerts are pictured by its camera (admin panel, else CAM_<NAME>_DOORS)
+    info = DoorInfo(s, store)   # names and prices from the admin panel
     doors = [DoorController(s, spec, store, relay, uplink,
                             snapshot=links.snapshotter(spec.name) if links else None,
-                            qr_api=qr_api)
+                            qr_api=qr_api, info=info)
              for spec in s.doors]   # empty when doors are off
 
     stop = threading.Event()
@@ -364,7 +416,8 @@ def main():
                  lambda: run_exit_poller(s, relay, doors, stop),
                  lambda: run_door_ticker(doors, stop)]
     if sensors or cameras:
-        jobs += [lambda: run_sensor_loop(s, sensors, cameras, uplink, stop, mq=mq, odour=odour)]
+        jobs += [lambda: run_sensor_loop(s, sensors, cameras, uplink, stop, mq=mq, odour=odour,
+                                         guard=guard)]
     if cameras:
         jobs += [lambda: run_prune_loop(s, stop)]
     if s.cam_monitor:   # CAM_MONITOR=0: no health checks, alert snapshots only
@@ -381,9 +434,12 @@ def main():
     log.info("functions: doors %s, camera %s, odour %s",
              on(s.enable_doors), on(s.enable_camera), on(s.enable_odour))
     for d in s.doors:
-        log.info("door %s: relay %d, unlock %g s, exit input %s, reed GPIO %s, scanners %s, "
-                 ".env camera %s", d.name, d.relay, d.unlock_seconds, d.exit_input, d.reed_gpio,
+        log.info("door %s (id %s): relay %d, unlock %g s, exit input %s, reed GPIO %s, "
+                 "scanners %s, .env camera %s", d.name, d.door_id or "not set", d.relay,
+                 d.unlock_seconds, d.exit_input, d.reed_gpio,
                  ", ".join(d.scanner_ips) or "any", d.camera or "none")
+    checked = [n for n, dev in guard.devices.items() if dev["macs"]]
+    log.info("MAC checks: %s", ", ".join(checked) or "none set (facility macs)")
     if doors:
         log.info("QR validation: %s", f"{s.qr_api_method} {s.qr_api_url} ({s.qr_api_order})"
                  if qr_api else "local cache only")
@@ -402,7 +458,7 @@ def main():
     log.info("facility node %s listening on %s:%d", s.facility_id, s.host, s.port)
     try:
         create_app(s, doors, store, uplink, cameras, odour=odour, qr_api=qr_api,
-                   camera_links=links).run(
+                   camera_links=links, guard=guard).run(
             host=s.host, port=s.port, threaded=True)
     finally:
         stop.set()

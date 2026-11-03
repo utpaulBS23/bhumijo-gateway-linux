@@ -134,9 +134,10 @@ class HttpSensors:
 
     KEYS = ("tvoc", "eco2", "aqi", "temperature", "humidity")
 
-    def __init__(self, url, timeout=3.0, max_age=120, session=None):
+    def __init__(self, url, timeout=3.0, max_age=120, session=None, verify=None):
         import requests
         self.url = url
+        self.verify = verify            # netcheck.MacGuard check; False = not our board
         self.timeout = timeout
         self.max_age = max_age          # seconds; older board readings count as missing
         self.session = session or requests.Session()
@@ -144,6 +145,8 @@ class HttpSensors:
 
     def read(self):
         out = dict.fromkeys(self.KEYS)
+        if self.verify is not None and not self.verify():
+            return out                  # logged and alerted by the guard
         try:
             r = self.session.get(self.url, timeout=self.timeout)
             r.raise_for_status()
@@ -168,15 +171,16 @@ class HttpSensors:
         return out
 
 
-def make_sensors(settings):
+def make_sensors(settings, verify=None):
     """HTTP sensor board when SENSOR_URL is set, otherwise the Pi's own I2C."""
     if settings.sensor_url:
         return HttpSensors(settings.sensor_url, timeout=settings.sensor_timeout,
-                           max_age=max(120, 3 * settings.sensor_interval))
+                           max_age=max(120, 3 * settings.sensor_interval), verify=verify)
     return Sensors()
 
 
-def run_sensor_loop(settings, sensors, cameras, uplink, stop, mq=None, odour=None):
+def run_sensor_loop(settings, sensors, cameras, uplink, stop, mq=None, odour=None,
+                    guard=None):
     """The 1-minute "sensor" push. sensors=None (odour off) or no cameras
     (camera off) send nulls for that part, so the backend sees the same fields."""
     while not stop.is_set():
@@ -191,6 +195,8 @@ def run_sensor_loop(settings, sensors, cameras, uplink, stop, mq=None, odour=Non
                    **reading,
                    # Camera health piggybacks the 1-minute push (plan section 6, note):
                    # every camera by name, and the first one as "camera" for older backends
-                   **camera_fields(cameras)}
+                   **camera_fields(cameras),
+                   # Every LAN device's IP, the MAC seen and whether it matches .env
+                   "devices": guard.state() if guard is not None else None}
         uplink.enqueue("sensor", payload)
         stop.wait(settings.sensor_interval)

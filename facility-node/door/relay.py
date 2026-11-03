@@ -22,6 +22,10 @@ class RelayAuthError(RelayError):
     pass
 
 
+class RelayMacError(RelayError):
+    """The device at the relay's IP is not the wired-in board (RELAY_MAC)."""
+
+
 def parse_states(body):
     """'Relay01=ON&Input01=OFF' -> {'Relay01': True, 'Input01': False}"""
     states = {}
@@ -34,13 +38,17 @@ def parse_states(body):
 
 
 class Relay:
-    def __init__(self, base_url, password, session=None, timeout=2.0):
+    def __init__(self, base_url, password, session=None, timeout=2.0, verify=None):
         self.base_url = base_url.rstrip("/")
         self.password = password
         self.session = session or requests.Session()
         self.timeout = timeout
+        # netcheck.MacGuard check: False = an impostor, so the password is not sent
+        self.verify = verify
 
     def _get(self, path, params):
+        if self.verify is not None and not self.verify():
+            raise RelayMacError(f"{path}: relay board MAC mismatch (RELAY_MAC), not sent")
         try:
             resp = self.session.get(
                 f"{self.base_url}/{path}", params=params, timeout=self.timeout)

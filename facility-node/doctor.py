@@ -76,7 +76,10 @@ def check_config(r, env_path):
     r.line(OK, "functions", ", ".join(f"{f} {'on' if getattr(s, 'enable_' + f) else 'OFF'}"
                                       for f in FEATURES))
     for d in s.doors:
-        r.line(OK, f"door {d.name}", f"relay {d.relay}, unlock {d.unlock_seconds:g} s, "
+        r.line(OK if d.door_id else WARN, f"door {d.name}",
+               (f"id {d.door_id}, " if d.door_id else "no DOOR_" + d.name.upper()
+                + "_ID (backend door id: no name/price, QR sends no door_id), ")
+               + f"relay {d.relay}, unlock {d.unlock_seconds:g} s, "
                f"exit input {d.exit_input}, "
                f"reed GPIO {d.reed_gpio}, scanners {', '.join(d.scanner_ips) or 'any'}")
     if s.enable_doors:
@@ -95,6 +98,35 @@ def check_config(r, env_path):
     if (os.stat(env_path).st_mode & 0o007) != 0:
         r.line(WARN, ".env readable by everyone", "sudo chmod 640 " + env_path)
     return s
+
+
+def check_macs(r, s):
+    """Each LAN device's MAC against .env (netcheck). Read-only."""
+    from netcheck import MacGuard, ping, arp_table, devices_from_settings
+    guard = devices_from_settings(MacGuard(s), s)
+    if not guard.devices:
+        return
+    r.section("Device MACs")
+    for dev in guard.devices.values():
+        ping(dev["ip"])
+    table = arp_table()
+    unset = []
+    for name, dev in guard.devices.items():
+        seen = table.get(dev["ip"])
+        if not dev["macs"]:
+            unset.append(name)
+            r.line(OK, f"{name} {dev['ip']}", f"MAC {seen or 'not seen'}, not checked")
+        elif seen in dev["macs"]:
+            r.line(OK, f"{name} {dev['ip']}", f"MAC {seen} matches")
+        elif seen is None:
+            r.line(WARN, f"{name} {dev['ip']} not answering", "MAC can't be checked; "
+                   "the node blocks it until it matches")
+        else:
+            r.line(FAIL, f"{name} {dev['ip']} MAC {seen}",
+                   f"expected {', '.join(dev['macs'])}: blocked. Another device on its IP?")
+    if unset:
+        r.line(WARN, "no MAC set for " + ", ".join(unset),
+               "facility macs save (on site, with the real devices)")
 
 
 def check_storage(r, s):
@@ -125,13 +157,19 @@ def check_storage(r, s):
 
 
 def check_relay(r, s):
-    from door.relay import Relay, RelayAuthError, RelayError
+    from door.relay import Relay, RelayAuthError, RelayError, RelayMacError
+    from netcheck import MacGuard, devices_from_settings
     r.section(f"Door: relay board ({s.relay_url})")
-    relay = Relay(s.relay_url, s.relay_pwd, timeout=3)
+    # Same MAC check as the service: never send the password to an impostor
+    guard = devices_from_settings(MacGuard(s), s)
+    relay = Relay(s.relay_url, s.relay_pwd, timeout=3, verify=guard.verifier("relay"))
     try:
         inputs = relay.read_inputs()
     except RelayAuthError:
         r.line(FAIL, "wrong relay password", "RELAY_PWD must equal POST_PASSWORD in board_secrets.py")
+        return
+    except RelayMacError:
+        r.line(FAIL, "MAC doesn't match RELAY_MAC", "password not sent; see Device MACs above")
         return
     except RelayError as e:
         r.line(FAIL, "not reachable", str(e))
@@ -355,6 +393,7 @@ def main(argv=None):
             check_storage(r, s)
             if not args.offline:
                 check_backend(r, s)
+                check_macs(r, s)
         for name in FUNCTIONS:
             if args.only in (None, name):
                 check_function(r, s, name, args.offline)

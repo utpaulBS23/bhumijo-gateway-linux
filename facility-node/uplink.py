@@ -191,6 +191,11 @@ class Uplink:
         # missing or null = use the .env links. camera.CameraLinks checks it.
         links = body.get("cameraDoors")
         self.store.set_cred("camera_doors", json.dumps(links) if links else "")
+        # Each door's name and price by the backend's door id ({"BHU-001": {"name",
+        # "price"}}); door.info.DoorInfo checks it. Missing = keep the last one.
+        doors = body.get("doors")
+        if isinstance(doors, dict):
+            self.store.set_cred("door_info", json.dumps(doors))
         self.store.set_cred("last_pull", str(time.time()))
         self.last_pull_ok = time.time()
         log.info("token cache refreshed: %d tokens", len(tokens))

@@ -5,6 +5,7 @@
     inputs.py      reed switches (gpiozero), exit-input poller, door ticker
     qr_api.py      optional online QR validation
     qr_tool.py     Pi-made unlock QR codes (CLI: facility qr)
+    info.py        each door's name and price from the admin panel (by DOOR_<NAME>_ID)
 
 Switched by ENABLE_DOORS. Unlock decisions use only the local cache, so the
 doors open offline.

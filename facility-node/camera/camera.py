@@ -77,13 +77,23 @@ def run_prune_loop(settings, stop, interval=3600):
 class Camera:
     """One camera (config.CameraSpec): its health, and pictures for its doors' alerts."""
 
-    def __init__(self, settings, spec):
+    def __init__(self, settings, spec, verify=None):
         self.s = settings
         self.spec = spec
         self.name = spec.name
+        # netcheck.MacGuard check: False = not our camera, so no RTSP login is sent
+        self.verify = verify
         self._lock = threading.Lock()
         self.status = {"reachable": None, "streaming": None, "frozen": None,
                        "checked_at": None}
+
+    def _genuine(self):
+        if self.verify is None or self.verify():
+            if self.snapshot_status().get("mac_ok") is False:
+                self._update(mac_ok=True)
+            return True
+        self._update(reachable=False, streaming=False, frozen=None, mac_ok=False)
+        return False
 
     def _update(self, **kw):
         with self._lock:
@@ -97,10 +107,11 @@ class Camera:
     def probe(self):
         if not self.spec.host:
             return
-        self._update(reachable=tcp_probe(self.spec.host, self.spec.port))
+        if self._genuine():
+            self._update(reachable=tcp_probe(self.spec.host, self.spec.port))
 
     def frame_check(self, gap=3.0):
-        if not self.spec.rtsp:
+        if not self.spec.rtsp or not self._genuine():
             return
         first = _grab_gray_frame(self.spec.rtsp)
         if first is None:
@@ -116,7 +127,7 @@ class Camera:
     def snapshot(self):
         """Save a JPEG; return its filename as the snapshot ref, or None.
         The camera name is in the filename: two cameras can fire the same second."""
-        if not self.spec.rtsp:
+        if not self.spec.rtsp or not self._genuine():
             return None
         os.makedirs(self.s.snapshot_dir, exist_ok=True)
         name = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{self.name}.jpg"
@@ -183,6 +194,9 @@ class CameraLinks:
         self.cameras = {c.name: c for c in cameras}
         self.by_host = {c.spec.host: c.name for c in cameras if c.spec.host}
         self.doors = [d.name for d in settings.doors]
+        # The panel names doors by the backend's door id (DOOR_<NAME>_ID); the
+        # Pi's own door names are accepted too
+        self.door_ids = {d.door_id: d.name for d in settings.doors if d.door_id}
         self.default = {d.name: d.camera for d in settings.doors}
         self.store = store
         self.shooters = {c.name: make_snapshotter(c, uplink) for c in cameras}
@@ -190,7 +204,8 @@ class CameraLinks:
 
     def _from_backend(self):
         """{door: camera} from the stored admin panel links, or None (use .env).
-        Keys may be a camera name or its IP. Anything invalid -> .env, logged."""
+        Keys may be a camera name or its IP; doors a backend door id or the Pi's
+        door name. Anything invalid -> .env, logged."""
         raw = self.store.get_cred(LINKS_KEY) if self.store is not None else None
         if not raw:
             return None
@@ -203,7 +218,7 @@ class CameraLinks:
                 if cam is None:
                     raise ValueError(f"camera {key!r} is not set up on this Pi")
                 for door in doors:
-                    door = str(door).strip().lower()
+                    door = self.door_ids.get(str(door).strip(), str(door).strip().lower())
                     if door not in result:
                         raise ValueError(f"door {door!r} is not on this Pi")
                     if result[door] is not None:

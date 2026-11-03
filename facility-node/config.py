@@ -183,6 +183,8 @@ class DoorSpec:
     scanner_ips: Tuple[str, ...]  # QR scanners whose scans open this door
     unlock_seconds: float = UNLOCK_DEFAULT   # QR / app unlock time; the exit button uses its timer
     camera: Optional[str] = None  # camera that snapshots this door's alerts, None = no picture
+    door_id: Optional[str] = None # the backend's id for this door (gate), None = not linked
+    scanner_macs: Tuple[str, ...] = ()   # MACs this door's scanners must have, () = no check
 
 
 @dataclass(frozen=True)
@@ -192,6 +194,7 @@ class CameraSpec:
     host: str
     port: int
     rtsp: str
+    macs: Tuple[str, ...] = ()    # MAC the camera must have, () = no check
 
 
 def _optional_int(name):
@@ -199,6 +202,27 @@ def _optional_int(name):
     if value is None or value.lower() == "none":
         return None
     return int(value)
+
+
+def _macs(name):
+    """Comma-separated MACs -> normalised tuple (lower case, colons). '' = no check."""
+    raw = _env(name, "")
+    macs = []
+    for part in (p.strip().lower() for p in raw.split(",") if p.strip()):
+        if not _MAC.match(part):
+            raise ConfigError(f"{name}: {part!r} is not a MAC address (e.g. 2c:cf:67:01:a7:ea)")
+        macs.append(part.replace("-", ":"))
+    return tuple(macs)
+
+
+def _door_id(name):
+    """The backend's device id for a door, BHU-<number> (e.g. BHU-001), upper case."""
+    value = _env(name)
+    if value is None:
+        return None
+    if not re.fullmatch(r"BHU-\d{1,12}", value.upper()):
+        raise ConfigError(f"{name}: {value!r} is not a device id like BHU-001")
+    return value.upper()
 
 
 def _ips(name):
@@ -220,7 +244,8 @@ def _parse_doors():
     names = _env("DOORS")
     if names is None:
         doors = (DoorSpec("main", _int("DOOR_RELAY", 1), _int("EXIT_INPUT_INDEX", 0),
-                          _int("REED_GPIO", 27), _ips("SCANNER_IPS"), unlock),)
+                          _int("REED_GPIO", 27), _ips("SCANNER_IPS"), unlock,
+                          door_id=_door_id("DOOR_ID"), scanner_macs=_macs("SCANNER_MACS")),)
     else:
         doors = []
         for name in [n.strip().lower() for n in names.split(",") if n.strip()]:
@@ -232,7 +257,9 @@ def _parse_doors():
                 raise ConfigError(f"{pre}RELAY is required")
             doors.append(DoorSpec(name, int(relay), _optional_int(pre + "EXIT_INPUT"),
                                   _optional_int(pre + "REED_GPIO"), _ips(pre + "SCANNER_IPS"),
-                                  _float(pre + "UNLOCK_SECONDS", unlock)))
+                                  _float(pre + "UNLOCK_SECONDS", unlock),
+                                  door_id=_door_id(pre + "ID"),
+                                  scanner_macs=_macs(pre + "SCANNER_MACS")))
         doors = tuple(doors)
     _validate_doors(doors)
     return doors
@@ -253,6 +280,8 @@ def _validate_doors(doors):
     unique("exit input", [d.exit_input for d in doors])
     unique("reed GPIO", [d.reed_gpio for d in doors])
     unique("scanner IP", [ip for d in doors for ip in d.scanner_ips])
+    unique("door id", [d.door_id for d in doors])
+    unique("scanner MAC", [m for d in doors for m in d.scanner_macs])
     for d in doors:
         if not 1 <= d.relay <= 4:
             raise ConfigError(f"door {d.name}: relay {d.relay} not in 1-4")
@@ -274,7 +303,8 @@ def _parse_cameras():
     names = _env("CAMERAS")
     if names is None:
         host, rtsp = _env("CAM_HOST", ""), _env("CAM_RTSP", "")
-        return (CameraSpec("main", host, _int("CAM_PORT", 554), rtsp),) if host or rtsp else ()
+        return ((CameraSpec("main", host, _int("CAM_PORT", 554), rtsp, _macs("CAM_MAC")),)
+                if host or rtsp else ())
     cameras = []
     for name in [n.strip().lower() for n in names.split(",") if n.strip()]:
         if not re.fullmatch(r"[a-z0-9_]+", name):
@@ -285,7 +315,7 @@ def _parse_cameras():
         host, rtsp = _env(pre + "HOST", ""), _env(pre + "RTSP", "")
         if not (host or rtsp):
             raise ConfigError(f"camera {name}: set {pre}HOST and {pre}RTSP")
-        cameras.append(CameraSpec(name, host, _int(pre + "PORT", 554), rtsp))
+        cameras.append(CameraSpec(name, host, _int(pre + "PORT", 554), rtsp, _macs(pre + "MAC")))
     return tuple(cameras)
 
 
@@ -341,6 +371,7 @@ class Settings:
     # KC868-A4S (doors)
     relay_url: str
     relay_pwd: str
+    relay_macs: Tuple[str, ...]   # MAC the relay board must have, () = no check
     doors: Tuple[DoorSpec, ...]
     exit_poll_interval: float  # seconds between input_ctl.cgi polls
 
@@ -378,6 +409,7 @@ class Settings:
 
     # Sensors on a WiFi board (firmware/air-sensor); "" = ENS160/AHT20 on the Pi's I2C
     sensor_url: str
+    sensor_macs: Tuple[str, ...]  # MAC the sensor board must have, () = no check
     sensor_timeout: float
 
     # Cameras (CAMERAS, or the single CAM_HOST / CAM_RTSP camera "main")
@@ -450,6 +482,7 @@ class Settings:
             enable_odour=odour_on,
             relay_url=_required("RELAY_URL").rstrip("/") if doors_on else "",
             relay_pwd=_required("RELAY_PWD") if doors_on else "",
+            relay_macs=_macs("RELAY_MAC"),
             doors=doors,
             exit_poll_interval=_float("EXIT_POLL_INTERVAL", 0.2),
             admin_url=admin_url,
@@ -484,6 +517,7 @@ class Settings:
             attendant_purposes=tuple(p.strip().lower() for p in _env(
                 "ATTENDANT_PURPOSES", "cleaning,bath,toilet,maintenance").split(",") if p.strip()),
             sensor_url=_env("SENSOR_URL", ""),
+            sensor_macs=_macs("SENSOR_MAC"),
             sensor_timeout=_float("SENSOR_TIMEOUT", 3.0),
             cameras=cameras,
             cam_monitor=_bool("CAM_MONITOR", True),
