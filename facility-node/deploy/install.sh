@@ -104,7 +104,7 @@ if git -C "$SRC" rev-parse >/dev/null 2>&1 \
         && [ "$(git -C "$SRC" config core.hooksPath || true)" != "facility-node/deploy/githooks" ]; then
     echo "Tip: sudo bash $SRC/deploy/bootstrap.sh  -> every 'git pull' then reinstalls automatically"
 fi
-if [ "$FIRST_INSTALL" = 1 ] || grep -q CHANGE_ME "$DEST/.env"; then
+if [ "$FIRST_INSTALL" = 1 ] || grep -qE "^[A-Z0-9_]+=CHANGE_ME" "$DEST/.env"; then
     cat <<NEXT
 
 Next:
