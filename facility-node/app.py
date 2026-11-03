@@ -4,6 +4,7 @@ LAN only. Never expose port 5454 to the internet.
 
     POST /qr              {token}            QR scanner; door chosen by scanner IP
     POST /api/device/code {token}            same as /qr, for scanners with that fixed path
+    POST /api/device/DoorHeart               scanner heartbeat (every 30 s): recorded, opens nothing
     GET|POST /qrscanner   ?cardid=..         same, legacy scanner format + response
     POST /rakindaqrscanner {SCode}           same, Rakinda format + response
     POST /facility/open   {authCode, door}   Facility app; door = section name or door id
@@ -25,6 +26,7 @@ from flask import Flask, g, jsonify, request
 
 from camera.camera import camera_fields
 from config import SCANNER_MESSAGES
+from uplink import iso
 
 log = logging.getLogger("app")
 
@@ -33,6 +35,9 @@ STATUS = {"opened": 200, "denied": 403, "relay_error": 502,
           "bad_request": 400}
 
 ATTENDANT_USES = ("customer", "personal")
+
+# Scanners beat every 30 s; no beat for this long = that scanner is offline
+HEARTBEAT_STALE = 120
 
 
 def attendant_fields(data, headers, purposes):
@@ -75,7 +80,7 @@ def attendant_fields(data, headers, purposes):
 
 # Door endpoints, switched off with ENABLE_DOORS=0
 DOOR_ENDPOINTS = {"qr", "qrscanner", "rakinda", "facility_open", "facility_doors",
-                  "door_opened", "door_closed"}
+                  "door_heart", "door_opened", "door_closed"}
 
 # Backend refusal reasons that mean "top up your balance"
 NO_BALANCE = {"insufficient_balance", "insufficient_funds", "no_balance", "low_balance"}
@@ -265,6 +270,28 @@ def create_app(settings, doors, store, uplink, cameras=(), limiter=None, odour=N
 
     # Scanner-compatible routes: same checks as /qr, replies in the format the
     # existing scanners already understand. Drop once all scanners use /qr.
+    heartbeats = {}   # scanner IP -> last heartbeat (unix s)
+
+    @app.post("/api/device/DoorHeart")
+    def door_heart():
+        """The scanners' "I'm alive" call. Only remembered, for /health: a scanner
+        that stops beating is offline. Anyone on the LAN can send one, so it
+        never opens anything or changes a door."""
+        ip = request.remote_addr or "?"
+        if ip in by_scanner or any_scanner is not None:
+            heartbeats[ip] = time.time()
+        return jsonify(ok=True), 200
+
+    def scanner_state(d):
+        """{ip: {"last_heartbeat": iso or None, "alive": bool or None}} for one door."""
+        now = time.time()
+        out = {}
+        for ip in d.door.scanner_ips:
+            ts = heartbeats.get(ip)
+            out[ip] = {"last_heartbeat": iso(ts) if ts else None,
+                       "alive": None if ts is None else now - ts < HEARTBEAT_STALE}
+        return out
+
     @app.route("/qrscanner", methods=["GET", "POST"])
     def qrscanner():
         result, door = scan()
@@ -344,6 +371,7 @@ def create_app(settings, doors, store, uplink, cameras=(), limiter=None, odour=N
             doors={d.name: {"open": d.is_open, "relay": d.door.relay,
                             "unlock_s": d.door.unlock_seconds,
                             "scanners": list(d.door.scanner_ips),
+                            "scanner_heartbeat": scanner_state(d),
                             "door_id": d.door.door_id, **d.details()} for d in doors},
             devices=guard.state() if guard else None,
             reed=settings.reed,

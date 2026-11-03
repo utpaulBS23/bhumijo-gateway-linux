@@ -907,6 +907,24 @@ class TwoDoorTests(unittest.TestCase):
         self.assertEqual(h["doors"]["female"]["scanners"], ["192.168.10.102"])
 
 
+class DoorHeartTests(unittest.TestCase):
+    """Scanners post /api/device/DoorHeart every 30 s: answered, never opens."""
+
+    def test_heartbeat_recorded_not_opening(self):
+        doors, relay, up, _, store = make_doors(TWO_DOORS)
+        s = doors[0].s
+        c = create_app(s, doors, store, Uplink(s, store, session=FakeSession())).test_client()
+        before = c.get("/health").json["doors"]["male"]["scanner_heartbeat"]
+        self.assertEqual(before, {"192.168.10.101": {"last_heartbeat": None, "alive": None}})
+        r = c.post("/api/device/DoorHeart", data="x", environ_base={"REMOTE_ADDR": "192.168.10.101"})
+        self.assertEqual((r.status_code, r.json), (200, {"ok": True}))
+        c.post("/api/device/DoorHeart", environ_base={"REMOTE_ADDR": "192.168.10.50"})   # not a scanner
+        h = c.get("/health").json["doors"]
+        self.assertTrue(h["male"]["scanner_heartbeat"]["192.168.10.101"]["alive"])
+        self.assertIsNone(h["female"]["scanner_heartbeat"]["192.168.10.102"]["alive"])
+        self.assertEqual((relay.fired, up.items), ([], []))
+
+
 class ScannerFormatTests(unittest.TestCase):
     """Every known scanner format reaches the same token check."""
 

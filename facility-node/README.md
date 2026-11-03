@@ -259,6 +259,7 @@ Port 5454, **facility LAN only**: the firewall blocks everything else, and there
 |---|---|---|---|
 | `POST /qr` | QR scanner | `{token}`, form field, or plain-text body | `200 opened` · `403 denied` / `unknown_scanner` · `502 relay_error` |
 | `POST /api/device/code` | Scanner with that fixed path | same as `/qr` | same as `/qr` |
+| `POST /api/device/DoorHeart` | Scanner heartbeat (every 30 s) | anything | `200 {ok: true}`; opens nothing. `/health` → `doors.<door>.scanner_heartbeat` shows each scanner's last beat and `alive` (a beat in the last 2 min) |
 | `GET\|POST /qrscanner` | Legacy-format scanner | `?cardid=…` | always 200: `{status, access_granted}` |
 | `POST /rakindaqrscanner` | Rakinda scanner | `{SCode}` | `{ResultCode:"1"\|"0", Msg, Audio}` |
 | `POST /facility/open` | Facility app | `{authCode, door}` or headers `X-Auth-Code` + `X-Door` | `200` · `403` · `400 unknown_door` · `429` · `502` |
