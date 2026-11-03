@@ -383,7 +383,8 @@ Multipart `POST` with field `file` (image/jpeg) plus form fields `id`, `facility
 |---|---|
 | 2xx | Delivered, removed from the queue (a duplicate `id` should also get 2xx) |
 | Network error, 5xx, 401, 403, 408, 429 | Keeps it, pauses, retries every `FLUSH_INTERVAL` |
-| Other 4xx | Retries 5 times, then drops that one item (logged) so it can't block the queue |
+| 404, 405 | The endpoint doesn't exist (not built yet, or wrong `*_PATH`): keeps everything, pauses, retries |
+| Other 4xx (400, 422…) | Retries 5 times, then drops that one item (logged) so it can't block the queue |
 
 ---
 

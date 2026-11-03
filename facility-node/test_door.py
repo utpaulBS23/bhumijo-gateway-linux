@@ -298,6 +298,17 @@ class OfflineTests(unittest.TestCase):
         self.assertEqual({k: v for k, v in last.items() if k != "id"}, {"good": True})
         self.assertEqual(self.store.queue_size(), 0)
 
+    def test_missing_endpoint_keeps_queue(self):
+        """404 / 405 = the backend hasn't built that path: pause, never drop."""
+        for status in (404, 405):
+            self.uplink.enqueue("sensor", {"x": status})
+            self.http.post_status = status
+            for _ in range(10):
+                self.assertEqual(self.uplink.flush(), 0)
+            self.assertEqual(self.store.queue_size(), 1, status)
+            self.http.post_status = 200
+            self.assertEqual(self.uplink.flush(), 1)
+
     def test_pull_failure_keeps_cache(self):
         self.store.replace_tokens([("cached", None)])
         self.http.online = False

@@ -6,8 +6,10 @@ same id, so the backend can drop duplicates.
 
 Every outbound item is written to the SQLite outbox first, then drained
 oldest-first. A network error or 5xx stops the drain (backend unreachable,
-retry later); a 4xx means the backend rejected that item, which is retried a
-few times and then dropped so one bad row cannot block the queue forever.
+retry later), and so does 404 / 405: the endpoint doesn't exist (not built
+yet, or a wrong *_PATH), which is no fault of the item, so nothing is lost
+while it is fixed. Another 4xx means the backend rejected that item, which is
+retried a few times and then dropped so one bad row cannot block the queue.
 """
 
 import json
@@ -22,6 +24,8 @@ import requests
 log = logging.getLogger("uplink")
 
 MAX_REJECTS = 5
+# The path itself is missing: pause the drain like an outage, never drop items
+ENDPOINT_MISSING = (404, 405)
 
 
 def iso(ts):
@@ -147,6 +151,12 @@ class Uplink:
                         self.store.ack(row_id)
                         sent += 1
                         self.last_flush_ok = time.time()
+                    elif resp.status_code in ENDPOINT_MISSING:
+                        log.warning("backend HTTP %d on %s %s: endpoint missing (not built "
+                                    "yet, or check ADMIN_URL / the *_PATH); keeping %d queued",
+                                    resp.status_code, kind, self.paths[kind],
+                                    self.store.queue_size())
+                        return sent
                     elif resp.status_code >= 500 or resp.status_code in (401, 403, 408, 429):
                         # Server or auth trouble: not this row's fault, retry later
                         log.warning("backend HTTP %d on %s, pausing drain",
