@@ -10,19 +10,23 @@ whatever the backend exposes:
     QR_API_DOOR_FIELD=door               # empty = don't send
     QR_API_EXTRA={"device":"pi-01"}      # extra static fields (JSON)
     QR_API_AUTH_HEADER=Device-Auth-Code  # send DEVICE_AUTH_CODE in it, not the admin key
-    QR_API_ALLOW_FIELD=allowed           # dot path in the JSON reply, e.g. data.access_granted
-    QR_API_ALLOW_VALUES=true,1,yes,granted,allow,allowed,success
+    QR_API_ALLOW_FIELD=message           # dot path in the JSON reply, e.g. data.access_granted
+    QR_API_ALLOW_VALUES=service unlocked
     QR_API_DENY_STATUS=400,402,403,404,410,422
     QR_API_SCAN_ID_FIELD=scan_id         # one id per scan, also sent as Idempotency-Key
-    QR_API_REASON_FIELD=reason           # why it refused, e.g. insufficient_balance
+    QR_API_REASON_FIELD=message          # why it refused, e.g. insufficient_balance
 
 Result of a check:
     "allow"        2xx and the allow field holds an allow value
     "deny"         2xx with any other value, or a QR_API_DENY_STATUS code
-    "unavailable"  timeout, network error, 5xx, 401 (our credentials, not the
-                   person's code), or an unreadable reply
+    "unavailable"  timeout, network error, 5xx, or an unreadable reply
                    -> local_first / api_first: the local token cache decides
                    -> api_only: refused (no internet = no QR entry)
+    "fault"        the backend refused this Pi's setup, not the person's code:
+                   401 (Device Auth Code wrong) or a refusal saying unknown_door
+                   (DOOR_<NAME>_ID not a gate of this facility). Handled like
+                   "unavailable", but the scanner asks for the attendant
+                   instead of blaming the internet.
 
 Paid entry (the backend charges per scan): every call carries a scan_id, in
 the body and as the Idempotency-Key header. If a reply is lost and the same
@@ -41,6 +45,9 @@ import time
 import requests
 
 log = logging.getLogger("qr_api")
+
+# Refusal reasons that are the Pi's setup, not the customer's code
+SETUP_REASONS = {"unknown_door"}
 
 
 def dig(obj, path):
@@ -120,11 +127,15 @@ class QRValidator:
         reason = str(reason)[:64] if reason not in (None, "") else None
         if code in self.s.qr_api_deny_status:
             self.last_ok = time.time()
+            if reason in SETUP_REASONS:
+                return self._fault(reason, f"HTTP {code} {reason}: check DOOR_<NAME>_ID "
+                                           "against the gates in the admin panel")
             return "deny", reason or f"HTTP {code}"
         if code == 401:
             # The backend refused this Pi, not the person's code
             fix = "DEVICE_AUTH_CODE" if self.s.qr_api_auth_header else "ADMIN_KEY"
-            return self._unavailable(f"HTTP 401, credentials refused: check {fix}")
+            return self._fault(reason or "invalid_device_code",
+                               f"HTTP 401, credentials refused: check {fix}")
         if not 200 <= code < 300:
             return self._unavailable(f"HTTP {code}")
         if body is None:
@@ -143,6 +154,12 @@ class QRValidator:
         log.warning("QR API unavailable (%s)%s", why,
                     ": QR refused" if self.s.qr_api_order == "api_only" else ", using local cache")
         return "unavailable", None
+
+    def _fault(self, reason, why):
+        self.last_error = f"{time.strftime('%H:%M:%S')} {why}"
+        log.error("QR API refused this Pi's setup (%s)%s", why,
+                  ": QR refused" if self.s.qr_api_order == "api_only" else ", using local cache")
+        return "fault", reason
 
     def state(self):
         return {"order": self.s.qr_api_order, "method": self.s.qr_api_method,

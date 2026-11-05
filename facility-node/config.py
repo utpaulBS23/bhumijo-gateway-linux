@@ -416,7 +416,7 @@ class Settings:
     cameras: Tuple[CameraSpec, ...]
     cam_monitor: bool          # health checks (probe + frozen feed); off = alert snapshots only
     snapshot_dir: str
-    snapshot_upload_path: str  # PENDING backend: multipart upload endpoint; "" = off
+    snapshot_upload_path: str  # multipart upload endpoint; "" = off
     snapshot_keep_days: int
 
     # Local store
@@ -489,10 +489,10 @@ class Settings:
             admin_key=_required("ADMIN_KEY"),
             admin_auth_header=_env("ADMIN_AUTH_HEADER", "Authorization"),
             admin_auth_scheme=_env("ADMIN_AUTH_SCHEME", "Bearer"),
-            sensor_path=_env("SENSOR_PATH", "/facility/sensor"),
-            door_event_path=_env("DOOR_EVENT_PATH", "/facility/door-event"),
-            alert_path=_env("ALERT_PATH", "/facility/alert"),
-            tokens_path=_env("TOKENS_PATH", "/facility/tokens"),
+            sensor_path=_env("SENSOR_PATH", "/gateway/facility-node/sensor"),
+            door_event_path=_env("DOOR_EVENT_PATH", "/gateway/facility-node/door-event"),
+            alert_path=_env("ALERT_PATH", "/gateway/facility-node/alert"),
+            tokens_path=_env("TOKENS_PATH", "/gateway/facility-node/config"),
             qr_api_url=_qr_api_url(admin_url),
             qr_api_method=_choice("QR_API_METHOD", "POST", ["POST", "GET"]).upper(),
             qr_api_order=_qr_api_order(admin_url),

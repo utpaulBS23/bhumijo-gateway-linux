@@ -131,7 +131,7 @@ facility feature camera on       # back on: restarts and checks it
 
 | `.env` | Off means |
 |---|---|
-| `ENABLE_DOORS=0` | No relay, exit-input or reed jobs, no token pull; the unlock endpoints answer `404 doors_off`. `RELAY_URL` / `RELAY_PWD` may stay `CHANGE_ME` |
+| `ENABLE_DOORS=0` | No relay, exit-input or reed jobs, no settings pull; the unlock endpoints answer `404 doors_off`. `RELAY_URL` / `RELAY_PWD` may stay `CHANGE_ME` |
 | `ENABLE_CAMERA=0` | No camera checks or snapshots; door alerts go out without a picture. `CAM_*` may stay unset |
 | `ENABLE_ODOUR=0` | No sensor reads or odour alerts; the 1-minute push sends `null` air values |
 
@@ -398,7 +398,7 @@ facility qr create --label test --hours 24 --token <token>
 
 ### 4.6 Online QR validation and paid entry
 
-By default the Pi checks codes against the token list it pulls every 5 minutes. To also ask your backend live, for example for tickets bought a minute ago or for instant revocation, set `QR_API_*` in `.env`.
+`.env.example` is set up for the Jabo Khotai backend: every QR is checked and charged online (`QR_API_ORDER=api_only`, below). Without `QR_API_URL` the Pi checks codes against a token list pulled every 5 minutes (older backends only).
 
 **Paid entry (the backend charges per scan).** Use `QR_API_ORDER=api_only`: every scan goes to the backend, which checks the user's balance and charges in the same call. The Pi opens only on its "yes":
 
@@ -407,6 +407,7 @@ By default the Pi checks codes against the token list it pulls every 5 minutes. 
 | Internet up, enough balance | Opens; `entry` logged with `scan_id` |
 | Internet up, no balance | Refused; `denied`, `api_reason: insufficient_balance` |
 | **No internet / backend down** | **Refused**; `denied`, `reason: offline` |
+| Backend refuses the Pi's Device Auth Code or door id | **Refused**; `denied`, `reason: setup_error`; the scanner asks for the attendant. Fix `DEVICE_AUTH_CODE` / `DOOR_<NAME>_ID` (`facility doctor door`) |
 | Scanner sends the same code again within 10 s | Same scan: no second charge, the door just stays open |
 | Backend charged, but the relay failed | `relay_failed` with `scan_id` is sent so the backend refunds |
 | Pi-made staff code (`facility qr`), Facility app, exit button | Open as always, also offline (no charge) |
@@ -422,11 +423,11 @@ Because paid entry now needs the internet, give the router a **backup connection
 **Jabo Khotai backend (customer app QR).** The customer shows the QR from the Jabo Khotai app; the Pi sends it to the backend's `POST /api/qr/validate` with the facility's Device Auth Code. The backend finds the door's service id and gender, runs `/user/accesses`, and answers `200 {"message": "Service unlocked"}` to open:
 
 1. Get the facility's **Auth Code** from the admin panel (Device List). One code per facility, both doors use it.
-2. Each door's **service id** is set in the admin panel; the Pi doesn't need it (it sends `facility` and `door`).
-3. In `.env` (keep `KEY=value` lines, no comment after a value):
+2. Each door is a **gate** in the admin panel (door device `BHU-…` → service, which gives the price and gender). Put each gate's device id in `DOOR_<NAME>_ID`; the Pi sends it as `door`.
+3. In `.env` (these are the `.env.example` values; keep `KEY=value` lines, no comment after a value):
 
 ```ini
-ADMIN_URL=https://stage-api.bhumijosmartmanagement.com/api
+ADMIN_URL=<the backend's API base, ending in /api>
 QR_API_URL=/qr/validate
 QR_API_ORDER=api_only
 QR_API_AUTH_HEADER=Device-Auth-Code
@@ -436,7 +437,7 @@ QR_API_ALLOW_VALUES=service unlocked
 QR_API_REASON_FIELD=message
 ```
 
-4. `sudo systemctl restart facility-node && facility doctor door`: expect "QR check sends Device-Auth-Code" and "QR API answers (deny for a fake code)". "credentials refused: check DEVICE_AUTH_CODE" = wrong Auth Code.
+4. `sudo systemctl restart facility-node && facility doctor door`: expect "QR check sends Device-Auth-Code" and "QR API answers (deny for a fake code)". "QR API refused this Pi's setup" with "check DEVICE_AUTH_CODE" = wrong Auth Code; with "check DOOR_<NAME>_ID" = the door id isn't a gate of this facility.
 5. Scan one real Jabo Khotai QR at each door, then a used or invalid one (the door stays shut; `facility logs` shows "QR denied (api_denied: <backend message>)").
 
 **Match your backend's API**
@@ -460,9 +461,9 @@ QR_API_REASON_FIELD=message
 
 **Pick the order**
 
-- **`QR_API_ORDER=local_first`** (recommended): codes in the cache open instantly, and only unknown codes go to the API. With the internet down, every cached code still opens.
+- **`QR_API_ORDER=local_first`** (older backends with a token list): codes in the cache open instantly, and only unknown codes go to the API. With the internet down, every cached code still opens.
 - **`QR_API_ORDER=api_first`:** every scan asks the API first, and a "no" from the API beats the cache, so revocation takes effect immediately. If the API doesn't answer within `QR_API_TIMEOUT` (5 s), the cache decides. Each scan can wait up to that long.
-- **`QR_API_ORDER=api_only`:** paid entry, as above. The API decides every scan, and without it no QR opens.
+- **`QR_API_ORDER=api_only`** (`.env.example`, Jabo Khotai): paid entry, as above. The API decides every scan, and without it no QR opens.
 
 Codes made with `facility qr` always open locally, in both modes.
 
@@ -514,19 +515,21 @@ POST /facility/open
 Content-Type: application/json
 
 {"authCode": "<auth code>", "door": "male", "use": "customer", "amount": 20}
-{"authCode": "<auth code>", "door": "female", "use": "personal", "purpose": "cleaning"}
+{"authCode": "<auth code>", "door": "female", "use": "personal", "purpose": "cleaning",
+ "attendant": "Rahim", "attendant_id": 615}
 ```
 
 | Field | Values | Meaning |
 |---|---|---|
-| `door` | `male` / `female` | Which door opens |
+| `door` | `male` / `female`, or the door id (`BHU-002`) | Which door opens |
 | `use` | `customer` | A customer paid **cash** at the counter: logged as a cash sale |
 | | `personal` | The attendant's own use: needs `purpose` |
 | `purpose` | `cleaning`, `bath`, `toilet`, `maintenance` | Personal use only; the list is `ATTENDANT_PURPOSES` in `.env` |
 | `amount` | number, optional | Customer use: the cash taken, for the backend's sales total |
-| `attendant` | text, optional | Who pressed it (name or ID), for the log |
+| `attendant` | text | Who pressed it: the attendant's name. **Required** for personal use |
+| `attendant_id` | whole number | The attendant's backend user id, so the backend files it under that user. **Required** for personal use |
 
-It works **offline**: the door opens on the Auth Code alone and the event reaches the backend later. A wrong `use`, a missing or unknown `purpose`, or a bad `amount` gets `400` with `reason` (`bad_use`, `bad_purpose`, `bad_amount`) and opens nothing. An older app that sends no `use` still opens and is logged as before.
+It works **offline**: the door opens on the Auth Code alone and the event reaches the backend later. A wrong `use`, a missing or unknown `purpose`, a bad `amount` or `attendant_id`, or personal use without both `attendant` and `attendant_id` gets `400` with `reason` (`bad_use`, `bad_purpose`, `bad_amount`, `bad_attendant_id`, `no_attendant`) and opens nothing. An older app that sends no `use` still opens and is logged as before.
 
 Five wrong Auth Codes in 60s from one phone block that phone for a minute.
 
@@ -560,7 +563,7 @@ Then **revoke the test codes**: `facility qr revoke --label test`.
 | Scan → `unknown scanner` | The scanner's IP isn't the one in `DOOR_*_SCANNER_IPS` (check the DHCP pool) |
 | Scan → nothing in the log | Wrong scanner URL or mode; try `curl -XPOST http://192.168.10.104:5454/qr -d test` from the LAN |
 | Scan → `404 doors_off` | `ENABLE_DOORS=0`: `facility feature door on` |
-| Valid QR denied | The code expired, or the token pull hasn't run (`/health` → `tokens`, `last_pull`) |
+| Valid QR denied | The code expired, or the settings pull hasn't run (`/health` → `tokens`, `last_pull`) |
 | New tickets denied until the next pull | Turn on online validation (section 4.6) |
 | Paid QR refused with `reason: offline` | No internet or backend down (`facility health` → `qr_api.last_error`). By design with `api_only`; staff codes and the app still open |
 | Paid QR refused with `api_reason: insufficient_balance` | The user must top up; the backend decides |

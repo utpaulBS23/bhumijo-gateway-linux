@@ -190,13 +190,16 @@ def run_sensor_loop(settings, sensors, cameras, uplink, stop, mq=None, odour=Non
         add_tvoc_score(reading)
         if odour is not None:
             odour.update(reading)
+        if guard is not None:
+            guard.sweep()       # reachable + MAC re-check for every LAN device
         payload = {"facility": settings.facility_id,
                    "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                    **reading,
                    # Camera health piggybacks the 1-minute push (plan section 6, note):
                    # every camera by name, and the first one as "camera" for older backends
                    **camera_fields(cameras),
-                   # Every LAN device's IP, the MAC seen and whether it matches .env
+                   # Every LAN device's IP, the MAC seen, whether it matches .env
+                   # and whether it answers
                    "devices": guard.state() if guard is not None else None}
         uplink.enqueue("sensor", payload)
         stop.wait(settings.sensor_interval)

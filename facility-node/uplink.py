@@ -187,18 +187,21 @@ class Uplink:
                 log.error("pull returned facilityId %r, expected %r; ignoring",
                           body.get("facilityId"), self.s.facility_id)
                 return False
-            tokens = [(t["token"], parse_expiry(t.get("expiresAt")))
-                      for t in body.get("tokens", [])]
+            # The facility-node backend sends no tokens (every QR is checked
+            # online); only an older backend that does replaces the cache
+            tokens = None if "tokens" not in body else [
+                (t["token"], parse_expiry(t.get("expiresAt"))) for t in body["tokens"]]
         except (requests.RequestException, ValueError, KeyError, TypeError) as e:
-            log.warning("token pull failed, keeping cache: %s", e)
+            log.warning("settings pull failed, keeping cache: %s", e)
             return False
-        self.store.replace_tokens(tokens)
-        # PENDING backend: field carrying the Facility-app Auth Code
+        if tokens is not None:
+            self.store.replace_tokens(tokens)
+        # The Facility app's Auth Code; missing = keep the last one
         auth_code = body.get("authCode")
         if auth_code:
             self.store.set_auth_code(auth_code)
-        # Admin panel's camera -> doors links ({"entry": ["male", "female"]});
-        # missing or null = use the .env links. camera.CameraLinks checks it.
+        # Admin panel's camera -> doors links ({"main": ["BHU-001", "BHU-002"]});
+        # missing, null or {} = use the .env links. camera.CameraLinks checks it.
         links = body.get("cameraDoors")
         self.store.set_cred("camera_doors", json.dumps(links) if links else "")
         # Each door's name and price by the backend's door id ({"BHU-001": {"name",
@@ -208,7 +211,7 @@ class Uplink:
             self.store.set_cred("door_info", json.dumps(doors))
         self.store.set_cred("last_pull", str(time.time()))
         self.last_pull_ok = time.time()
-        log.info("token cache refreshed: %d tokens", len(tokens))
+        log.info("settings pulled%s", "" if tokens is None else f": {len(tokens)} tokens")
         return True
 
     # ---- background loops -------------------------------------------------

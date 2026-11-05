@@ -253,20 +253,26 @@ def check_backend(r, s):
         r.line(WARN, "not reachable", f"{type(e).__name__}; events queue on the Pi"
                + ("; doors still open from cache" if s.enable_doors else ""))
         return
-    if resp.status_code in (401, 403):
-        r.line(FAIL, f"token pull HTTP {resp.status_code}", "check ADMIN_KEY / ADMIN_AUTH_HEADER")
+    if resp.status_code == 401:
+        r.line(FAIL, "settings pull HTTP 401", "check ADMIN_KEY (the node key) / ADMIN_AUTH_HEADER")
+    elif resp.status_code == 403:
+        r.line(FAIL, "settings pull HTTP 403",
+               f"FACILITY_ID={s.facility_id} is not the node key's facility (or ADMIN_KEY wrong)")
     elif resp.status_code >= 400:
-        r.line(FAIL, f"token pull HTTP {resp.status_code}", f"check TOKENS_PATH={s.tokens_path}")
+        r.line(FAIL, f"settings pull HTTP {resp.status_code}", f"check TOKENS_PATH={s.tokens_path}")
     else:
-        r.line(OK, f"token pull HTTP {resp.status_code}")
+        r.line(OK, f"settings pull HTTP {resp.status_code}")
 
 
 def check_qr_api(r, s):
     from door.qr_api import QRValidator, qr_auth_headers
     from uplink import Uplink
     v = QRValidator(s, auth_headers=qr_auth_headers(s, Uplink(s, store=None)))
-    verdict = v.check("DOCTOR-PROBE-NOT-A-REAL-CODE", s.doors[0].name if s.doors else None)
-    if verdict == "unavailable":
+    door = (s.doors[0].door_id or s.doors[0].name) if s.doors else None
+    verdict = v.check("DOCTOR-PROBE-NOT-A-REAL-CODE", door)
+    if verdict == "fault":
+        r.line(FAIL, f"QR API refused this Pi's setup (door {door})", v.last_error)
+    elif verdict == "unavailable":
         r.line(FAIL, f"QR API {s.qr_api_url}", v.last_error)
     elif verdict == "allow":
         r.line(WARN, "QR API allowed a fake code", "check QR_API_ALLOW_FIELD / the backend")

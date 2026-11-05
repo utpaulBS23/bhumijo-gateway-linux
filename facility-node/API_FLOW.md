@@ -24,7 +24,7 @@ How every request moves between the apps, the Raspberry Pi (facility node) and t
  ┌───────────────────────────────────────┐        ┌──────────────────────────────────────────────────────┐
  │ Backend  stage-api.bhumijo…/api        │        │  Raspberry Pi 5 — facility node, port 5454           │
  │  • /qr/validate     (QR check+charge) ◄├────────┤  • asks the backend about each customer QR           │
- │  • token pull       (settings)        ◄├────────┤  • pulls settings every 5 min                        │
+ │  • settings pull    (config)          ◄├────────┤  • pulls settings every 5 min                        │
  │  • sensor / door-event / alert / snap ◄├────────┤  • pushes everything it sees (queued on the SD card) │
  │ Admin panel (office staff)             │        │                                                      │
  └───────────────────────────────────────┘        │   ▲ POST /qr           ▲ POST /facility/open          │
@@ -95,13 +95,13 @@ sequenceDiagram
    Idempotency-Key: 6f1c…-uuid
    Content-Type: application/json
 
-   {"token": "<customer QR token>", "facility": "facility-001", "door": "BHU-001",
+   {"token": "<customer QR token>", "facility": "995", "door": "BHU-001",
     "scan_id": "6f1c…-uuid"}
    ```
 
    - `Device-Auth-Code`: one per facility (admin panel → Device List), kept in the Pi's `.env`. It identifies the facility; the admin key is not sent on this call.
    - `token`: exactly what the scanner read (the customer's `device_access_token`).
-   - `facility`: the Pi's `FACILITY_ID`.
+   - `facility`: the Pi's `FACILITY_ID`, the facility's id in the admin panel (e.g. `995`).
    - `door`: the door's device id (`DOOR_<NAME>_ID`, e.g. `BHU-001`).
    - `scan_id` / `Idempotency-Key`: a new random id for every scan. **Not a credential** (that's `Device-Auth-Code`): it lets the backend charge a scan once even if the Pi has to ask twice, and a `relay_failed` event names it for the refund.
 5. **Inside `/qr/validate` (backend):**
@@ -114,25 +114,15 @@ sequenceDiagram
    | `/qr/validate` reply | Pi does | Scanner shows |
    |---|---|---|
    | **200** `{"message": "Service unlocked"}` | opens the gate (relay held 5 s) | "Please Enter the facility" |
-   | **4xx** (400 / 402 / 403 / 404 / 410 / 422) `{"message": "<reason>"}` | stays shut; logs `message` as `api_reason` | "Insufficient balance, please top up" if `message` is `insufficient_balance` (or `insufficient_funds`, `no_balance`, `low_balance`), else "Access denied" |
+   | **4xx** (400 / 402 / 403 / 404 / 410 / 422) `{"message": "<reason>"}`: `402 insufficient_balance`, `403 invalid_token` / `user_blocked`, `400 recent_usage` | stays shut; logs `message` as `api_reason` | "Insufficient balance, please top up" if `message` is `insufficient_balance` (or `insufficient_funds`, `no_balance`, `low_balance`), else "Access denied" |
    | 200 with any other `message` | stays shut | "Access denied" |
-   | **401** | stays shut; logs "credentials refused: check DEVICE_AUTH_CODE" (the Pi's code is wrong, not the customer's) | "No internet, please try again" |
-   | timeout (5 s), network error, 5xx | stays shut | "No internet, please try again" |
+   | **401** `invalid_device_code`, or **404** `unknown_door` | stays shut (`reason: setup_error`); logs an error: check `DEVICE_AUTH_CODE` / `DOOR_<NAME>_ID` (the Pi's setup is wrong, not the customer's code) | "Door error, please call the attendant" |
+   | timeout (5 s), network error, 5xx (also `503 processing`) | stays shut (`reason: offline`) | "No internet, please try again" |
 
    The text is compared ignoring upper/lower case and outer spaces, so `"Service unlocked"` and `"SERVICE UNLOCKED"` both open; `"Service unlocked."` (with a full stop) would not.
 7. **Relay failed after "Service unlocked"** (the customer was charged but the door did not open): the Pi sends a `relay_failed` door-event with the same `scan_id`, so the backend can **refund** it.
 8. **Report:** every outcome becomes a door-event (section 8), sent from the queue.
 
----|---|---|
-   | any **2xx** | opens the gate (relay held 5 s) | "Please Enter the facility" |
-   | **400 / 402 / 403 / 404 / 410 / 422** | stays shut; logs the reply's `message` as `api_reason` | "Insufficient balance, please top up" if `message` is `insufficient_balance` (or `insufficient_funds`, `no_balance`, `low_balance`), else "Access denied" |
-   | **401** | stays shut; logs "credentials refused: check DEVICE_AUTH_CODE" (the Pi's code is wrong, not the customer's) | "No internet, please try again" |
-   | timeout (5 s), network error, 5xx | stays shut | "No internet, please try again" |
-
-6. **Relay failed after a 2xx** (the customer was charged but the door did not open): the Pi sends a `relay_failed` door-event with the same `scan_id`, so the backend can **refund** it.
-7. **Report:** every outcome becomes a door-event (section 8), sent from the queue.
-
-> **Backend: please refuse with a 4xx.** The Pi treats any 2xx as "granted". A refusal sent as `200 {"granted": false}` would open the gate. If the backend must answer 200 either way, tell us the field name and the Pi will read it instead (`QR_API_ALLOW_FIELD`).
 
 ---
 
@@ -164,7 +154,7 @@ sequenceDiagram
 ```json
 POST /facility/open
 {"authCode": "<facility auth code>", "door": "BHU-002",
- "use": "personal", "purpose": "cleaning", "attendant": "rahim"}
+ "use": "personal", "purpose": "cleaning", "attendant": "rahim", "attendant_id": 615}
 ```
 
 | Field | Meaning |
@@ -172,9 +162,10 @@ POST /facility/open
 | `authCode` | The facility's Auth Code (also accepted as header `X-Auth-Code`) |
 | `door` | The gate: its device id (`BHU-002`) or `male` / `female` (or header `X-Door`) |
 | `use` | `customer`: a customer paid cash at the counter (`amount` optional, logged as a cash sale). No `amount` = the door's price; a different amount still opens but is flagged `price_mismatch: true`. `personal`: the attendant's own use, with `purpose` = `cleaning` / `bath` / `toilet` / `maintenance` |
-| `attendant` | Who pressed it. **Required** for `personal`; optional for `customer` |
+| `attendant` | Who pressed it (name). **Required** for `personal`; optional for `customer` |
+| `attendant_id` | The attendant's backend user id (whole number). **Required** for `personal`; optional for `customer` |
 
-**Replies:** `200 opened` · `403 denied` (wrong code) · `400 unknown_door` / `bad_use` / `bad_purpose` / `bad_amount` / `no_attendant` · `429` after 5 wrong codes from one phone in 60 s (blocked 1 min) · `502 relay_error` (relay board down; a cash sale is reported as `relay_failed` so it can be voided).
+**Replies:** `200 opened` · `403 denied` (wrong code) · `400 unknown_door` / `bad_use` / `bad_purpose` / `bad_amount` / `bad_attendant_id` / `no_attendant` · `429` after 5 wrong codes from one phone in 60 s (blocked 1 min) · `502 relay_error` (relay board down; a cash sale is reported as `relay_failed` so it can be voided).
 
 **The app's door buttons:** `GET /facility/doors` with header `X-Auth-Code` (never in the URL) returns each door's Pi name (`door`), device id (`door_id`), name, price and whether it is open, from the last settings pull, so it works offline:
 
@@ -238,15 +229,15 @@ Every 60 s the Pi pushes one **sensor** item: air readings from the sensor board
 
 ```json
 POST SENSOR_PATH
-{"id": "7f3c…", "facility": "facility-001", "ts": "2026-10-30T10:15:00Z",
+{"id": "7f3c…", "facility": "995", "ts": "2026-10-30T10:15:00Z",
  "tvoc": 120, "tvoc_score": 11, "tvoc_level": "very_good", "eco2": 450, "aqi": 2,
  "temperature": 28.4, "humidity": 71.2, "nh3_ppm": null, "h2s_ppm": null,
  "camera":  {"reachable": true, "streaming": true, "frozen": false, "checked_at": "…"},
  "cameras": {"entry": {"reachable": true, "streaming": true, "frozen": false, "checked_at": "…"}},
- "devices": {"relay":          {"ip": "192.168.10.174", "mac": "2c:bc:bb:bf:70:a3", "expected": ["2c:bc:bb:bf:70:a3"], "ok": true},
-             "scanner_male":   {"ip": "192.168.10.101", "mac": "00:88:22:09:87:58", "expected": null, "ok": null},
-             "camera_main":    {"ip": "192.168.10.149", "mac": "90:6a:94:66:7c:9d", "expected": null, "ok": null},
-             "sensor_board":   {"ip": "192.168.10.105", "mac": "64:e8:33:73:de:ac", "expected": null, "ok": null}}}
+ "devices": {"relay":          {"ip": "192.168.10.174", "mac": "2c:bc:bb:bf:70:a3", "expected": ["2c:bc:bb:bf:70:a3"], "ok": true, "reachable": true},
+             "scanner_male":   {"ip": "192.168.10.101", "mac": "00:88:22:09:87:58", "expected": null, "ok": null, "reachable": true},
+             "camera_main":    {"ip": "192.168.10.149", "mac": "90:6a:94:66:7c:9d", "expected": null, "ok": null, "reachable": true},
+             "sensor_board":   {"ip": "192.168.10.105", "mac": "64:e8:33:73:de:ac", "expected": null, "ok": null, "reachable": true}}}
 ```
 
 **Device MACs.** `devices` is every LAN device the Pi talks to, with the MAC it actually sees (from its ARP table). Each can have its MAC set in `.env` (`RELAY_MAC`, `DOOR_<NAME>_SCANNER_MACS`, `CAM_MAC`, `SENSOR_MAC`; fill them on site with `facility macs save`). Then:
@@ -258,7 +249,7 @@ POST SENSOR_PATH
 | Camera | no RTSP login sent, no snapshot; camera reported offline (`mac_ok: false`) |
 | Sensor board | its readings are not used (nulls) |
 
-Each case raises an alert `device_mismatch` (`device`, `ip`, `expected`, `seen`), at most every 10 min per device. `ok: null` = no MAC set, reported only. The Device List can show these next to the Pi's own `mac` from the settings pull. A MAC can be faked, so this complements a strong relay password and a separate customer WiFi; it doesn't replace them.
+Each case raises an alert `device_mismatch` (`device`, `ip`, `expected`, `seen`), at most every 10 min per device. `ok: null` = no MAC set, reported only. `reachable` is checked just before each push (TCP connect; for a scanner a heartbeat in the last 2 min, else a ping), so the backend can raise device-offline alerts. The Device List can show these next to the Pi's own `mac` from the settings pull. A MAC can be faked, so this complements a strong relay password and a separate customer WiFi; it doesn't replace them.
 
 - `null` = sensor warming up, failed or not fitted.
 - **Odour alert:** any metric over its limit for 10 min → alert `odour_high` (repeated every 30 min while high); all back under for 5 min → `odour_resolved`.
@@ -271,12 +262,12 @@ Each case raises an alert `device_mismatch` (`device`, `ip`, `expected`, `seen`)
 The Pi pulls its settings every 5 minutes (and at start). This is how office staff change things without touching the Pi.
 
 ```http
-GET TOKENS_PATH?facility=facility-001&mac=2c:cf:67:01:a7:ea
+GET TOKENS_PATH?facility=995&mac=2c:cf:67:01:a7:ea
 Authorization: Bearer <ADMIN_KEY>
 ```
 
 ```json
-{"facilityId": "facility-001",
+{"facilityId": "995",
  "authCode": "<Facility app auth code>",
  "doors": {"BHU-001": {"name": "Gents Toilet",  "price": 10},
            "BHU-002": {"name": "Ladies Toilet", "price": 10}},
@@ -324,21 +315,21 @@ flowchart LR
 
 - **Every item has a unique `id`** (UUID), in the body and as the `Idempotency-Key` header. A retry after a lost reply sends the **same id**. The backend must store ids and answer a repeat with 2xx **without saving it twice**.
 - `ts` is when it happened (ISO 8601 UTC), not when it was sent: after an outage, events arrive late but with the right time.
-- All pushes carry `Authorization: Bearer <ADMIN_KEY>` (header and scheme configurable).
+- All pushes carry `Authorization: Bearer <ADMIN_KEY>` (the node key; header and scheme configurable). The backend answers `200 {"ok": true}` (`"duplicate": true` for a repeat).
 
 **Door-event types** (`POST DOOR_EVENT_PATH`). Every one has `facility`, `door` (device id), `type`, `ts`; there is no `source`, the `type` says what happened:
 
 ```json
-{"id": "…", "facility": "facility-001", "door": "BHU-002", "type": "attendant", "ts": "…Z",
- "use": "personal", "purpose": "cleaning", "attendant": "rahim"}
+{"id": "…", "facility": "995", "door": "BHU-002", "type": "attendant", "ts": "…Z",
+ "use": "personal", "purpose": "cleaning", "attendant": "rahim", "attendant_id": 615}
 ```
 
 | `type` | When | Extra fields |
 |---|---|---|
 | `entry` | QR opened the gate | `scan_id`, `price` (charged by the backend; none for a staff code) |
-| `attendant` | Facility app opened it | `use`; personal: `purpose` + `attendant`; customer: `payment: cash`, `amount`, `price`, `price_mismatch`?, `attendant`? |
+| `attendant` | Facility app opened it | `use`; personal: `purpose` + `attendant` + `attendant_id`; customer: `payment: cash`, `amount`, `price`, `price_mismatch`?, `attendant`?, `attendant_id`? |
 | `exit` | Exit button pressed | — |
-| `denied` | Refused | QR: `reason` (`api_denied`, `offline`, `unknown`, `empty`), `api_reason` (the backend's `message`), `scan_id`. Facility app: no `reason` |
+| `denied` | Refused | QR: `reason` (`api_denied`, `offline`, `setup_error`, `unknown`, `empty`), `api_reason` (the backend's `message`), `scan_id`. Facility app: no `reason` |
 | `relay_failed` | Paid (online or cash) but the door did not open | `scan_id` or the cash-sale fields: **refund / void** |
 | `door_closed` | Door shut again | `duration_s` |
 
@@ -350,16 +341,16 @@ flowchart LR
 
 ### Backend endpoints the Pi calls
 
-Paths are set in the Pi's `.env`, so the backend may choose its own; tell us the final ones.
+Paths are set in the Pi's `.env`; the defaults are the backend's paths (backend branch `feature/facility-node-api`, see `FACILITY_NODE_FEATURE_REPORT.md`).
 
 | Call | Default path (`.env` key) | When | Status |
 |---|---|---|---|
-| QR check + charge | `POST /qr/validate` (`QR_API_URL`) | each customer scan | **To build**: wraps the existing `/user/accesses` (section 2). Pi side ready |
-| Settings pull | `GET /facility/tokens` (`TOKENS_PATH`, may be renamed e.g. `/facility/config`) | every 5 min | **To build** (`authCode`, `cameraDoors`) |
-| Door-event push | `POST /facility/door-event` (`DOOR_EVENT_PATH`) | each event | **To build** |
-| Alert push | `POST /facility/alert` (`ALERT_PATH`) | each anomaly | **To build** |
-| Sensor push | `POST /facility/sensor` (`SENSOR_PATH`) | every 60 s | **To build** |
-| Snapshot upload | multipart `POST` (`SNAPSHOT_UPLOAD_PATH`) | with each door alert | **To build** (optional; off until set) |
+| QR check + charge | `POST /qr/validate` (`QR_API_URL`) | each customer scan | Built (backend branch), not yet deployed |
+| Settings pull | `GET /gateway/facility-node/config` (`TOKENS_PATH`) | every 5 min | Built, not yet deployed |
+| Door-event push | `POST /gateway/facility-node/door-event` (`DOOR_EVENT_PATH`) | each event | Built, not yet deployed |
+| Alert push | `POST /gateway/facility-node/alert` (`ALERT_PATH`) | each anomaly | Built, not yet deployed |
+| Sensor push | `POST /gateway/facility-node/sensor` (`SENSOR_PATH`) | every 60 s | Built, not yet deployed |
+| Snapshot upload | multipart `POST /gateway/facility-node/snapshot` (`SNAPSHOT_UPLOAD_PATH`) | with each door alert | Built, not yet deployed |
 
 Until an endpoint exists, the Pi keeps its items queued (nothing is lost), up to 200 000; the oldest sensor readings are dropped first.
 

@@ -9,7 +9,7 @@ Install the facility node on a Raspberry Pi 5: from an empty SD card to a runnin
 |---|---|
 | Time | About 30 min (most of it is the OS update) |
 | You need | Pi 5 (4 GB), endurance microSD (32 GB), 5V/5A USB-C supply, Ethernet cable, a laptop on the same network |
-| From the backend team | `FACILITY_ID`, `ADMIN_URL`, `ADMIN_KEY` (and the API paths / auth header if not the defaults) |
+| From the backend team | `FACILITY_ID` (the facility's id), `ADMIN_URL`, `ADMIN_KEY` (the node key, `fnk_…`, shown once when the Pi is added), `DEVICE_AUTH_CODE` (Device List), the door ids `DOOR_<NAME>_ID` (`BHU-…`) |
 | From the site | KC868 board password (`POST_PASSWORD`), camera RTSP URL |
 
 ---
@@ -197,7 +197,7 @@ Or later, without editing the file: `facility feature camera off`. The settings 
 
 | Setting | Value |
 |---|---|
-| `FACILITY_ID` | from the admin backend, e.g. `facility-001` |
+| `FACILITY_ID` | the facility's id in the admin panel, a number, e.g. `995` |
 | `RELAY_PWD` | doors: the KC868 board's `POST_PASSWORD` (SETUP.md section 4.2) |
 | `ADMIN_URL` | backend base URL, e.g. `https://admin.example.com/api` |
 | `ADMIN_KEY` | backend key |
@@ -245,7 +245,7 @@ The doctor checks:
 - the database folder and free space;
 - the relay board (reachable, password right, exit inputs reported);
 - the camera port and `ffmpeg`;
-- the backend token pull, and the QR API if configured;
+- the backend settings pull, and the QR API if configured;
 - the I2C sensors (AHT20 0x38, ENS160 0x53, ADS1115 0x48);
 - that the service is running and `/health` answers.
 
@@ -444,7 +444,9 @@ sudo bash deploy/uninstall.sh --purge    # also deletes the database, snapshots,
 | Doctor: `0x38` / `0x53` not found | Sensor wiring (SDA = pin 3, SCL = pin 5, 3.3V = pin 1, GND = pin 9). Check with `sudo i2cdetect -y 1` |
 | Doctor: `wrong relay password` | `RELAY_PWD` ≠ the board's `POST_PASSWORD` |
 | Doctor: `firmware doesn't report inputs` | Flash `firmware/kc868/main.py` (SETUP.md section 4.2) |
-| Doctor: `token pull HTTP 401` | `ADMIN_KEY` or `ADMIN_AUTH_HEADER` / `ADMIN_AUTH_SCHEME` wrong |
-| Doctor: `token pull HTTP 404` | `ADMIN_URL` or `TOKENS_PATH` wrong |
+| Doctor: `settings pull HTTP 401` | `ADMIN_KEY` (the node key) or `ADMIN_AUTH_HEADER` / `ADMIN_AUTH_SCHEME` wrong |
+| Doctor: `settings pull HTTP 403` | `FACILITY_ID` isn't the facility the node key belongs to |
+| Doctor: `settings pull HTTP 404` | `ADMIN_URL` or `TOKENS_PATH` wrong, or the backend isn't deployed there |
+| Doctor: `QR API refused this Pi's setup` | `DEVICE_AUTH_CODE` wrong (`invalid_device_code`), or `DOOR_<NAME>_ID` isn't a gate of this facility (`unknown_door`) |
 | `facility health`: `Connection refused` | Service not running: `facility logs` shows why |
 | Time is wrong in the logs | `timedatectl` should show `NTP service: active`; the Pi needs internet once to sync |

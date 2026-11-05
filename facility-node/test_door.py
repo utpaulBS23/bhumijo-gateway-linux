@@ -328,6 +328,15 @@ class OfflineTests(unittest.TestCase):
         self.assertTrue(self.store.auth_code_valid("new-code"))
         self.assertEqual(self.http.get_calls[0][1]["facility"], "facility-001")
 
+    def test_pull_without_tokens_keeps_cache(self):
+        """The facility-node backend sends no tokens: the cache is left alone."""
+        self.store.replace_tokens([("cached", None)])
+        self.http.get_resp = FakeResp(200, {"facilityId": "facility-001", "authCode": "c",
+                                            "doors": {}, "cameraDoors": {}})
+        self.assertTrue(self.uplink.pull_tokens())
+        self.assertTrue(self.store.token_valid("cached"))
+        self.assertTrue(self.store.auth_code_valid("c"))
+
     def test_pull_for_other_facility_ignored(self):
         self.store.replace_tokens([("cached", None)])
         self.http.get_resp = FakeResp(200, {"facilityId": "facility-999", "tokens": []})
@@ -522,12 +531,14 @@ class FakeArp:
     def __init__(self, table=None):
         self.table = dict(table or {})
         self.touched = []
+        self.down = set()           # IPs that don't answer a TCP connect
 
     def __call__(self):
         return dict(self.table)
 
     def touch(self, ip, port):
         self.touched.append((ip, port))
+        return ip not in self.down
 
 
 RELAY_MAC = "aa:bb:cc:00:01:74"
@@ -585,12 +596,50 @@ class MacGuardTests(unittest.TestCase):
         self.assertEqual(arp.touched, [("192.168.10.174", 80)])
         self.assertIsNone(up.of("alert")[0]["seen"])
 
+    def test_sweep_reports_reachable(self):
+        """TCP connect for devices with a port, heartbeat or ping for scanners."""
+        g, arp, up, clock = self.guard({"192.168.10.174": RELAY_MAC,
+                                        "192.168.10.101": "aa:bb:cc:00:01:01"})
+        pinged = []
+        g.ping = lambda ip: pinged.append(ip) or ip == "192.168.10.102"
+        self.assertEqual({n: d["reachable"] for n, d in g.state().items()},
+                         {"relay": None, "scanner_male": None, "scanner_female": None})
+        g.heard("192.168.10.101")
+        arp.down.add("192.168.10.174")
+        g.sweep()
+        self.assertEqual({n: d["reachable"] for n, d in g.state().items()},
+                         {"relay": False, "scanner_male": True, "scanner_female": True})
+        self.assertEqual(pinged, ["192.168.10.102"], "a fresh heartbeat needs no ping")
+        clock.t += 121
+        arp.down.clear()
+        g.sweep()
+        self.assertEqual(pinged, ["192.168.10.102", "192.168.10.101", "192.168.10.102"])
+        self.assertEqual({n: d["reachable"] for n, d in g.state().items()},
+                         {"relay": True, "scanner_male": False, "scanner_female": True})
+
+    def test_sweep_rechecks_macs(self):
+        g, arp, up, _ = self.guard({"192.168.10.174": "aa:bb:cc:99:99:99"})
+        g.ping = lambda ip: False
+        g.sweep()
+        self.assertFalse(g.state()["relay"]["ok"])
+        self.assertTrue(g.state()["relay"]["reachable"])
+        self.assertEqual(up.of("alert")[0]["subtype"], "device_mismatch")
+
+    def test_heartbeat_from_wrong_mac_not_counted(self):
+        g, _, up, _ = self.guard({"192.168.10.101": "aa:bb:cc:99:99:99"},
+                                 {"DOOR_MALE_SCANNER_MACS": "aa:bb:cc:00:01:01"})
+        g.ping = lambda ip: False
+        g.heard("192.168.10.101")
+        g.sweep()
+        self.assertFalse(g.state()["scanner_male"]["reachable"])
+        self.assertEqual(up.of("alert")[0]["device"], "scanner_male")
+
     def test_device_without_mac_is_reported_not_checked(self):
         g, _, up, _ = self.guard({"192.168.10.101": "aa:bb:cc:00:01:01"})
         self.assertTrue(g.check("scanner_male"))
         self.assertEqual(g.state()["scanner_male"],
                          {"ip": "192.168.10.101", "mac": "aa:bb:cc:00:01:01",
-                          "expected": None, "ok": None})
+                          "expected": None, "ok": None, "reachable": None})
         self.assertEqual(up.items, [])
 
     def test_relay_never_sends_password_to_impostor(self):
@@ -1615,7 +1664,7 @@ class QRValidatorTests(unittest.TestCase):
         self.assertEqual(self.check(FakeResp(403))[0], "deny")
         self.assertEqual(self.check(FakeResp(404))[0], "deny")
         self.assertEqual(self.check(FakeResp(500))[0], "unavailable")
-        self.assertEqual(self.check(FakeResp(401))[0], "unavailable", "our key is wrong, not the code")
+        self.assertEqual(self.check(FakeResp(401))[0], "fault", "our key is wrong, not the code")
         self.assertEqual(self.check(FakeResp(200, None))[0], "unavailable", "non-JSON reply")
 
     def test_network_error_unavailable(self):
@@ -1739,10 +1788,16 @@ class DeviceAuthQRTests(unittest.TestCase):
         self.assertEqual(v.check_detail("BHU-1", "male"), ("deny", "insufficient_balance"))
 
     def test_401_is_our_code_not_theirs(self):
-        v, _ = self.validator(FakeResp(401, {"message": "Unauthenticated."}))
-        with self.assertLogs("qr_api", "WARNING"):
-            self.assertEqual(v.check("BHU-1", "male"), "unavailable")
+        v, _ = self.validator(FakeResp(401, {"message": "invalid_device_code"}))
+        with self.assertLogs("qr_api", "ERROR"):
+            self.assertEqual(v.check_detail("BHU-1", "male"), ("fault", "invalid_device_code"))
         self.assertIn("DEVICE_AUTH_CODE", v.last_error)
+
+    def test_unknown_door_is_our_setup(self):
+        v, _ = self.validator(FakeResp(404, {"message": "unknown_door"}))
+        with self.assertLogs("qr_api", "ERROR"):
+            self.assertEqual(v.check_detail("BHU-1", "BHU-009"), ("fault", "unknown_door"))
+        self.assertIn("DOOR_<NAME>_ID", v.last_error)
 
     def test_config(self):
         self.assertEqual(settings(JABO).device_auth_code, "dev-code-1")
@@ -1818,6 +1873,26 @@ class PaidEntryTests(unittest.TestCase):
         d, relay, up, _, _ = self.door(["down"])
         self.assertEqual(d.qr("cached"), "denied", "no internet = no balance check = no entry")
         self.assertEqual((up.of("door_event")[0]["reason"], relay.fired), ("offline", []))
+
+    def test_setup_fault_asks_for_the_attendant(self):
+        """A wrong Device Auth Code (401) or door id (unknown_door) is the Pi's
+        setup: refused, but the scanner doesn't blame the internet."""
+        from app import scanner_message
+        d, relay, up, _, _ = self.door([FakeResp(401, {"reason": "invalid_device_code"}),
+                                        FakeResp(404, {"reason": "unknown_door"})])
+        with self.assertLogs("qr_api", "ERROR"):
+            self.assertEqual(d.qr_scan("cached"), ("denied", "setup_error", None))
+            self.assertEqual(d.qr_scan("paid"), ("denied", "setup_error", None))
+        self.assertEqual([(e["reason"], e["api_reason"]) for e in up.of("door_event")],
+                         [("setup_error", "invalid_device_code"), ("setup_error", "unknown_door")])
+        self.assertEqual(relay.fired, [])
+        self.assertEqual(scanner_message(d.s, "denied", "setup_error"),
+                         "Door error, please call the attendant")
+
+    def test_setup_fault_api_first_falls_back_to_cache(self):
+        d, relay, _, _, _ = self.door([FakeResp(401, {})], order="api_first")
+        with self.assertLogs("qr_api", "ERROR"):
+            self.assertEqual(d.qr("cached"), "opened")
 
     def test_staff_codes_still_open_offline(self):
         d, relay, _, sess, _ = self.door([])
@@ -1981,23 +2056,33 @@ class DummyBackendTests(unittest.TestCase):
         return Bridge()
 
     def test_auth_required(self):
-        self.assertEqual(self.c.get("/api/facility/tokens?facility=f").status_code, 401)
-        self.assertEqual(self.c.get("/api/facility/tokens?facility=f", headers=self.H).status_code, 200)
+        self.assertEqual(self.c.get(PULL + "?facility=f").status_code, 401)
+        self.assertEqual(self.c.get(PULL + "?facility=f", headers=self.H).status_code, 200)
+
+    def test_other_facility_403(self):
+        self.app = __import__("dummy_backend").create_app(data_dir=self.tmp.name, quiet=True,
+                                                         facility="995")
+        self.c = self.app.test_client()
+        self.assertEqual(self.c.get(PULL + "?facility=996", headers=self.H).status_code, 403)
+        ev = {"id": "e1", "facility": "996", "door": "BHU-001", "type": "entry", "ts": "t"}
+        self.assertEqual(self.c.post(NODE + "/door-event", json=ev, headers=self.H).status_code, 403)
+        self.assertEqual(self.c.get(PULL + "?facility=995", headers=self.H).status_code, 200)
 
     def test_missing_fields_422_and_dedupe(self):
-        r = self.c.post("/api/facility/door-event", json={"id": "1", "facility": "f"}, headers=self.H)
+        r = self.c.post(NODE + "/door-event", json={"id": "1", "facility": "f"}, headers=self.H)
         self.assertEqual(r.status_code, 422)
         ev = {"id": "e1", "facility": "f", "door": "BHU-001", "type": "entry", "ts": "t"}
-        self.assertFalse(self.c.post("/api/facility/door-event", json=ev, headers=self.H).json["duplicate"])
-        self.assertTrue(self.c.post("/api/facility/door-event", json=ev, headers=self.H).json["duplicate"])
+        self.assertEqual(self.c.post(NODE + "/door-event", json=ev, headers=self.H).json, {"ok": True})
+        self.assertEqual(self.c.post(NODE + "/door-event", json=ev, headers=self.H).json,
+                         {"ok": True, "duplicate": True})
         state = self.c.get("/admin/state").json
         self.assertEqual((state["counts"]["door_event"], state["duplicates"]), (1, 1))
 
     def test_outage_returns_503(self):
         self.c.post("/admin/outage?on=1")
-        self.assertEqual(self.c.get("/api/facility/tokens?facility=f", headers=self.H).status_code, 503)
+        self.assertEqual(self.c.get(PULL + "?facility=f", headers=self.H).status_code, 503)
         self.c.post("/admin/outage?on=0")
-        self.assertEqual(self.c.get("/api/facility/tokens?facility=f", headers=self.H).status_code, 200)
+        self.assertEqual(self.c.get(PULL + "?facility=f", headers=self.H).status_code, 200)
 
     def test_camera_links_from_dummy_panel(self):
         from camera.camera import Camera, CameraLinks
@@ -2027,9 +2112,9 @@ class DummyBackendTests(unittest.TestCase):
                          "same scan again: same answer, no new charge")
         self.assertEqual(v.check_detail("DUMMY-ALLOW-0001", "female", "scan-2"),
                          ("deny", "insufficient_balance"))
-        self.assertEqual(v.check_detail("NOT-A-CODE", "male", "scan-3"), ("deny", "unknown_code"))
+        self.assertEqual(v.check_detail("NOT-A-CODE", "male", "scan-3"), ("deny", "invalid_token"))
         wrong = QRValidator(s, session=self.bridge(), auth_headers={"Device-Auth-Code": "nope"})
-        self.assertEqual(wrong.check("DUMMY-ALLOW-0002", "male"), "unavailable")
+        self.assertEqual(wrong.check("DUMMY-ALLOW-0002", "male"), "fault")
         self.assertIn("DEVICE_AUTH_CODE", wrong.last_error)
 
     def test_paid_entry_against_dummy(self):
@@ -2060,7 +2145,7 @@ class DummyBackendTests(unittest.TestCase):
 
     def test_node_end_to_end_against_dummy(self):
         s = settings(env={"ADMIN_URL": "http://127.0.0.1:8091/api", "ADMIN_KEY": "dummy-key",
-                          "SNAPSHOT_UPLOAD_PATH": "/facility/snapshot"},
+                          "SNAPSHOT_UPLOAD_PATH": "/gateway/facility-node/snapshot"},
                      snapshot_dir=self.tmp.name)
         store = Store(":memory:")
         up = Uplink(s, store, session=self.bridge())
@@ -2085,6 +2170,10 @@ class DummyBackendTests(unittest.TestCase):
         self.assertEqual(up.flush(), 4)
         counts = self.c.get("/admin/state").json["counts"]
         self.assertEqual(counts, {"door_event": 2, "alert": 0, "sensor": 1, "snapshot": 1})
+
+
+PULL = "/api/gateway/facility-node/config"
+NODE = "/api/gateway/facility-node"
 
 
 class FeatureTests(unittest.TestCase):
@@ -2207,12 +2296,13 @@ class AttendantUseTests(unittest.TestCase):
 
     def test_personal_with_purpose(self):
         for purpose in ("cleaning", "Bath", "toilet", "maintenance"):
-            self.assertEqual(self.open(use="personal", purpose=purpose, attendant="Rahim").status_code,
-                             200, purpose)
+            self.assertEqual(self.open(use="personal", purpose=purpose, attendant="Rahim",
+                                       attendant_id=615).status_code, 200, purpose)
         evs = self.up.of("door_event")
         self.assertEqual([e["purpose"] for e in evs], ["cleaning", "bath", "toilet", "maintenance"])
         self.assertTrue(all(e["use"] == "personal" and "payment" not in e for e in evs))
-        self.assertEqual({(e["door"], e["attendant"]) for e in evs}, {("male", "Rahim")})
+        self.assertEqual({(e["door"], e["attendant"], e["attendant_id"]) for e in evs},
+                         {("male", "Rahim", 615)})
 
     def test_bad_requests_open_nothing(self):
         for body, why in (({"use": "friend"}, "bad_use"),
@@ -2220,6 +2310,15 @@ class AttendantUseTests(unittest.TestCase):
                           ({"use": "personal", "purpose": "party"}, "bad_purpose"),
                           ({"use": "personal", "purpose": "bath"}, "no_attendant"),
                           ({"use": "personal", "purpose": "bath", "attendant": "  "}, "no_attendant"),
+                          ({"use": "personal", "purpose": "bath", "attendant": "Rahim"}, "no_attendant"),
+                          ({"use": "personal", "purpose": "bath", "attendant_id": 615}, "no_attendant"),
+                          ({"use": "personal", "purpose": "bath", "attendant": "Rahim",
+                            "attendant_id": "abc"}, "bad_attendant_id"),
+                          ({"use": "personal", "purpose": "bath", "attendant": "Rahim",
+                            "attendant_id": 0}, "bad_attendant_id"),
+                          ({"use": "personal", "purpose": "bath", "attendant": "Rahim",
+                            "attendant_id": 6.5}, "bad_attendant_id"),
+                          ({"use": "customer", "attendant_id": True}, "bad_attendant_id"),
                           ({"use": "customer", "amount": "ten"}, "bad_amount"),
                           ({"use": "customer", "amount": -5}, "bad_amount")):
             r = self.open(**body)
@@ -2229,16 +2328,17 @@ class AttendantUseTests(unittest.TestCase):
     def test_headers_and_older_app(self):
         r = self.c.post("/facility/open", headers={"X-Auth-Code": "auth-code-123", "X-Door": "female",
                                                     "X-Use": "personal", "X-Purpose": "cleaning",
-                                                    "X-Attendant": "Rahim"})
+                                                    "X-Attendant": "Rahim", "X-Attendant-Id": "615"})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(self.open().status_code, 200, "an app that sends no use still opens")
         a, b = self.up.of("door_event")
-        self.assertEqual((a["door"], a["purpose"], "use" in b), ("female", "cleaning", False))
+        self.assertEqual((a["door"], a["purpose"], a["attendant_id"], "use" in b),
+                         ("female", "cleaning", 615, False))
 
     def test_wrong_code_still_denied(self):
         r = self.c.post("/facility/open", json={"authCode": "nope", "door": "male",
                                                  "use": "personal", "purpose": "bath",
-                                                 "attendant": "Rahim"})
+                                                 "attendant": "Rahim", "attendant_id": 615})
         self.assertEqual(r.status_code, 403)
         self.assertEqual(self.relay.fired, [])
 

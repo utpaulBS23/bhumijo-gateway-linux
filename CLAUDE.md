@@ -51,7 +51,7 @@ Work from the repo root (the folder containing this file). Report briefly after 
    sudo grep -n 'CHANGE_ME' /opt/facility-node/.env | cut -d= -f1
    ```
    - **Ask the user** which of the three functions this site has (doors, camera, odour) and switch the others off (`ENABLE_*=0`, or `facility feature <fn> off` once installed).
-   - **Ask the user** for each missing value in one message: `FACILITY_ID`, `ADMIN_URL`, `ADMIN_KEY`, `RELAY_PWD` (doors), and the camera via `facility camera` (camera).
+   - **Ask the user** for each missing value in one message: `FACILITY_ID` (the facility's id in the admin panel, a number), `ADMIN_URL`, `ADMIN_KEY` (the node key, `fnk_…`), `RELAY_PWD` and `DEVICE_AUTH_CODE` (doors), each door's `DOOR_<NAME>_ID` (`BHU-…`, doors), and the camera via `facility camera` (camera).
    - Also ask whether these differ from the defaults:
      - the door map (male: Relay01 / Input01 / GPIO27 / scanner .101; female: Relay02 / Input02 / GPIO22 / scanner .102) and each door's unlock time (`DOOR_*_UNLOCK_SECONDS`, default 5 s);
      - `REED` (0 until reed switches are fitted);

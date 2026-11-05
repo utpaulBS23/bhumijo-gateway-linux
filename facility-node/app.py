@@ -8,7 +8,8 @@ LAN only. Never expose port 5454 to the internet.
     GET|POST /qrscanner   ?cardid=..         same, legacy scanner format + response
     POST /rakindaqrscanner {SCode}           same, Rakinda format + response
     POST /facility/open   {authCode, door}   Facility app; door = section name or door id
-                          + use: customer (cash, amount?) | personal (purpose), attendant?
+                          + use: customer (cash, amount?) | personal (purpose),
+                            attendant + attendant_id (both required for personal)
     GET  /facility/doors  X-Auth-Code        Facility app: each door's id, name, price, open
     POST /door/opened     ?door=<name>       bench test only (DOOR_TEST_ENDPOINTS=1)
     POST /door/closed     ?door=<name>       bench test only (DOOR_TEST_ENDPOINTS=1)
@@ -44,8 +45,9 @@ def attendant_fields(data, headers, purposes):
     """The Facility app's use / purpose / amount / attendant -> (fields, error).
 
     error is None, or why the request is refused (400): bad_use, bad_purpose,
-    bad_amount, no_attendant (personal use must say who). An app that sends no
-    `use` at all is accepted (older app).
+    bad_amount, bad_attendant_id, no_attendant (personal use must give both the
+    attendant's name and backend user id). An app that sends no `use` at all is
+    accepted (older app).
     """
     def get(key, header):
         v = headers.get(header) if headers.get(header) is not None else data.get(key)
@@ -53,6 +55,7 @@ def attendant_fields(data, headers, purposes):
 
     use, purpose = get("use", "X-Use"), get("purpose", "X-Purpose")
     amount, attendant = data.get("amount"), get("attendant", "X-Attendant")
+    attendant_id = get("attendant_id", "X-Attendant-Id")
     use = use.lower() if isinstance(use, str) and use else None
     if use is None:
         return {}, None
@@ -74,6 +77,18 @@ def attendant_fields(data, headers, purposes):
         fields["amount"] = amount
     if isinstance(attendant, (str, int)) and str(attendant).strip():
         fields["attendant"] = str(attendant).strip()[:64]
+    elif use == "personal":
+        return None, "no_attendant"
+    if attendant_id not in (None, ""):
+        try:
+            if isinstance(attendant_id, (bool, float)):
+                raise ValueError
+            attendant_id = int(attendant_id)
+        except (TypeError, ValueError):
+            return None, "bad_attendant_id"
+        if not 0 < attendant_id < 2 ** 63:
+            return None, "bad_attendant_id"
+        fields["attendant_id"] = attendant_id
     elif use == "personal":
         return None, "no_attendant"
     return fields, None
@@ -100,7 +115,7 @@ def scanner_message(settings, result, why, price=None, door_name=None):
                 return SCANNER_MESSAGES["opened"]
             msg = msg.replace("{price}", f"{price:g}")
         return msg.replace("{door}", door_name or "")
-    if result == "relay_error":
+    if result == "relay_error" or why == "setup_error":
         return msgs["error"]
     if why in NO_BALANCE:
         return msgs["no_balance"]
@@ -280,6 +295,8 @@ def create_app(settings, doors, store, uplink, cameras=(), limiter=None, odour=N
         ip = request.remote_addr or "?"
         if ip in by_scanner or any_scanner is not None:
             heartbeats[ip] = time.time()
+            if guard is not None:
+                guard.heard(ip)     # counts the scanner as reachable
         return jsonify(ok=True), 200
 
     def scanner_state(d):

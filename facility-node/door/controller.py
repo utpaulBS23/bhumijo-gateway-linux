@@ -104,7 +104,8 @@ class DoorController:
 
     def qr_detail(self, token):
         """-> (result, why). why says what the scanner should tell the person:
-        None (opened), "empty", "unknown", "offline", "relay_error", or the
+        None (opened), "empty", "unknown", "offline", "relay_error", "setup_error"
+        (the backend refused the Pi's auth code or door id), or the
         backend's refusal reason (e.g. "insufficient_balance", else "api_denied")."""
         return self.qr_scan(token)[:2]
 
@@ -161,9 +162,12 @@ class DoorController:
         if verdict == "deny":
             return (self._deny_qr("api_denied", scan_id=scan_id, api_reason=why),
                     why or "api_denied", None)
-        # unavailable
+        # unavailable, or fault: the backend refused the Pi's setup (auth code, door id)
         if order == "api_only":
-            # Paid entry: no internet = no check of the balance = no entry
+            # Paid entry: no check of the balance = no entry
+            if verdict == "fault":
+                return (self._deny_qr("setup_error", scan_id=scan_id, api_reason=why),
+                        "setup_error", None)
             return self._deny_qr("offline", scan_id=scan_id), "offline", None
         if order == "api_first" and kind:
             return self._opened(self._open("entry"))
@@ -181,12 +185,15 @@ class DoorController:
         self._door_event("denied", reason=reason, **extra)
         return "denied"
 
-    def facility_open(self, auth_code, use=None, purpose=None, amount=None, attendant=None):
+    def facility_open(self, auth_code, use=None, purpose=None, amount=None, attendant=None,
+                      attendant_id=None):
         """Facility app (attendant's button), authenticated by the per-facility Auth Code.
 
         use = "customer" (a customer paid cash at the counter: logged as a cash
         sale, amount optional) or "personal" (the attendant's own use, with a
         purpose such as cleaning or bath). None = an older app that sends neither.
+        attendant_id is the attendant's backend user id, so the backend files
+        the access under that user rather than matching the name.
         Never needs the internet: the backend gets the event from the queue.
         """
         if not self.auth_code_ok(auth_code):
@@ -196,7 +203,8 @@ class DoorController:
         details = {k: v for k, v in (
             ("use", use), ("purpose", purpose),
             ("payment", "cash" if use == "customer" else None),
-            ("amount", amount), ("attendant", attendant)) if v is not None}
+            ("amount", amount), ("attendant", attendant),
+            ("attendant_id", attendant_id)) if v is not None}
         if use == "customer":
             details.update(self._cash_price(amount))
         if use:

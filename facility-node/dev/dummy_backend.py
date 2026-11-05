@@ -12,30 +12,30 @@ Point the node at it (.env), then restart:
     ADMIN_KEY=dummy-key
     QR_API_URL=/qr/validate        # optional: online QR validation too
 
-Or like the Jabo Khotai backend (start with --jabo):
+Or like the Jabo Khotai backend (start with --jabo; the .env.example QR
+settings, with):
 
-    QR_API_URL=/qr/validate   QR_API_ORDER=api_only
-    QR_API_AUTH_HEADER=Device-Auth-Code   DEVICE_AUTH_CODE=dummy-device-code
-    QR_API_ALLOW_FIELD=message   QR_API_ALLOW_VALUES=service unlocked
-    QR_API_REASON_FIELD=message
+    DEVICE_AUTH_CODE=dummy-device-code
 
 Open http://127.0.0.1:8091/ for a live dashboard of what the Pi sent.
 
 Implements the contract in README.md section 8, with the default paths:
 
-    GET  /api/facility/tokens?facility=<id>&mac=<mac>   tokens + authCode (+ cameraDoors:
-                                              --camera-doors, doors: --doors)
-    POST /api/facility/sensor                 sensor readings
-    POST /api/facility/door-event             access log
-    POST /api/facility/alert                  anomalies
-    POST /api/facility/snapshot               multipart JPEG upload
-    POST /api/qr/validate                     online QR check + charge (paid entry); --jabo:
-                                              Device-Auth-Code header, 200 {"message":
-                                              "Service unlocked"} or 4xx {"message": reason}
+    GET  /api/gateway/facility-node/config?facility=<id>&mac=<mac>
+                                   settings pull: authCode, doors (--doors), cameraDoors
+                                   (--camera-doors); tokens too, except with --jabo
+    POST /api/gateway/facility-node/sensor        sensor readings
+    POST /api/gateway/facility-node/door-event    access log
+    POST /api/gateway/facility-node/alert         anomalies
+    POST /api/gateway/facility-node/snapshot      multipart JPEG upload
+    POST /api/qr/validate          online QR check + charge (paid entry); --jabo:
+                                   Device-Auth-Code header, 200 {"message":
+                                   "Service unlocked"} or 4xx {"message": reason}
 
-Behaves like a well-built backend: checks the auth header, rejects payloads
-missing required fields (422), ignores repeated event ids (returns 200 with
-"duplicate": true), and can simulate an outage (503) to test the Pi's queue.
+Behaves like the real backend: checks the node key, refuses a body whose
+facility isn't the key's (403, with --facility), rejects payloads missing
+required fields (422), ignores repeated event ids (200 {"ok": true,
+"duplicate": true}), and can simulate an outage (503) to test the Pi's queue.
 
 Paid entry, like the real backend must do it: each code has a balance
 (--balance, default 3 entries). /api/qr/validate charges one entry per
@@ -71,7 +71,8 @@ REQUIRED = {
 }
 DOOR_TYPES = {"entry", "attendant", "exit", "denied", "door_closed", "relay_failed"}
 ALERT_SUBTYPES = {"forced_open", "propped_open", "propped_resolved",
-                  "odour_high", "odour_resolved"}
+                  "odour_high", "odour_resolved", "device_mismatch"}
+NODE = "/api/gateway/facility-node"
 
 
 class State:
@@ -107,7 +108,7 @@ class State:
 def create_app(key="dummy-key", tokens=DEFAULT_TOKENS, auth_code="dummy-auth-code",
                data_dir=os.path.join(HERE, "backend-data"), outage=False, quiet=False,
                balance=3, camera_doors=None, jabo=False,
-               device_auth_code="dummy-device-code", doors=None):
+               device_auth_code="dummy-device-code", doors=None, facility=None):
     app = Flask("dummy_backend")
     st = State(tokens, auth_code, data_dir, balance)
     st.outage = outage
@@ -130,7 +131,12 @@ def create_app(key="dummy-key", tokens=DEFAULT_TOKENS, auth_code="dummy-auth-cod
             return None
         if key and request.headers.get("Authorization") != f"Bearer {key}":
             say(f"401 {request.method} {request.path}: bad or missing Authorization header")
-            return jsonify(error="unauthorized"), 401
+            return jsonify(message="Invalid API key."), 401
+        sent = (request.args.get("facility") or request.form.get("facility")
+                or (request.get_json(silent=True) or {}).get("facility"))
+        if facility and request.path.startswith(NODE) and sent not in (None, facility):
+            say(f"403 {request.path}: facility {sent!r} is not the key's ({facility!r})")
+            return jsonify(message="This API key does not belong to the given facility."), 403
         return None
 
     def push(kind):
@@ -140,11 +146,12 @@ def create_app(key="dummy-key", tokens=DEFAULT_TOKENS, auth_code="dummy-auth-cod
         missing = REQUIRED[kind] - payload.keys()
         if missing:
             say(f"422 {kind}: missing {sorted(missing)}")
-            return jsonify(error=f"missing fields: {sorted(missing)}"), 422
+            return jsonify(message=f"missing fields: {sorted(missing)}",
+                           errors={f: ["required"] for f in sorted(missing)}), 422
         if kind == "door_event" and payload["type"] not in DOOR_TYPES:
-            return jsonify(error=f"unknown door-event type {payload['type']!r}"), 422
+            return jsonify(message=f"unknown door-event type {payload['type']!r}"), 422
         if kind == "alert" and payload["subtype"] not in ALERT_SUBTYPES:
-            return jsonify(error=f"unknown alert subtype {payload['subtype']!r}"), 422
+            return jsonify(message=f"unknown alert subtype {payload['subtype']!r}"), 422
         new = st.record(kind, payload)
         if new and kind == "door_event" and payload["type"] == "relay_failed":
             with st.lock:   # charged, but nobody got in: refund
@@ -155,47 +162,48 @@ def create_app(key="dummy-key", tokens=DEFAULT_TOKENS, auth_code="dummy-auth-cod
                     say(f"REFUND scan {payload['scan_id']}: {token} back to {st.balance[token]}")
         brief = {k: v for k, v in payload.items() if k not in ("id", "facility", "camera", "readings")}
         say(f"{'NEW' if new else 'DUP'} {kind:<10} {json.dumps(brief)[:140]}")
-        return jsonify(ok=True, duplicate=not new), 200
+        return delivered(new)
 
-    @app.post("/api/facility/sensor")
+    def delivered(new):
+        return (jsonify(ok=True) if new else jsonify(ok=True, duplicate=True)), 200
+
+    @app.post(NODE + "/sensor")
     def sensor():
         return push("sensor")
 
-    @app.post("/api/facility/door-event")
+    @app.post(NODE + "/door-event")
     def door_event():
         return push("door_event")
 
-    @app.post("/api/facility/alert")
+    @app.post(NODE + "/alert")
     def alert():
         return push("alert")
 
-    @app.post("/api/facility/snapshot")
+    @app.post(NODE + "/snapshot")
     def snapshot():
         f = request.files.get("file")
         meta = request.form.to_dict()
         if f is None or not {"id", "facility", "name", "ts"} <= meta.keys():
-            return jsonify(error="need file + id, facility, name, ts"), 422
+            return jsonify(message="need file + id, facility, name, ts"), 422
         name = os.path.basename(meta["name"])
         if not st.record("snapshot", {**meta, "name": name}):
-            return jsonify(ok=True, duplicate=True), 200
+            return delivered(False)
         f.save(os.path.join(st.data_dir, "snapshots", name))
         say(f"NEW snapshot   {name}" + (f"  camera {meta['camera']}" if meta.get("camera") else ""))
-        return jsonify(ok=True, duplicate=False), 200
+        return delivered(True)
 
-    @app.get("/api/facility/tokens")
-    def tokens_pull():
-        facility = request.args.get("facility")
-        if not facility:
-            return jsonify(error="facility query parameter required"), 400
+    @app.get(NODE + "/config")
+    def settings_pull():
+        wanted = request.args.get("facility")
+        if not wanted:
+            return jsonify(message="The facility field is required.",
+                           errors={"facility": ["required"]}), 422
         mac = request.args.get("mac")
-        say(f"pull tokens for {facility}" + (f" (MAC {mac})" if mac else " (no MAC)")
-            + f": {len(st.tokens)} tokens")
-        body = dict(facilityId=facility, authCode=st.auth_code,
-                    tokens=[{"token": t, "expiresAt": None} for t in st.tokens])
-        if camera_doors:   # the admin panel's camera -> doors links
-            body["cameraDoors"] = camera_doors
-        if doors:          # each door's name and price, by backend door id
-            body["doors"] = doors
+        say(f"settings pull for {wanted}" + (f" (MAC {mac})" if mac else " (no MAC)"))
+        body = dict(facilityId=wanted, authCode=st.auth_code,
+                    doors=doors or {}, cameraDoors=camera_doors or {})
+        if not jabo:       # older backends: tokens for the Pi's local cache
+            body["tokens"] = [{"token": t, "expiresAt": None} for t in st.tokens]
         return jsonify(body)
 
     def charge(token, scan_id):
@@ -220,14 +228,19 @@ def create_app(key="dummy-key", tokens=DEFAULT_TOKENS, auth_code="dummy-auth-cod
         data = {**request.args.to_dict(), **(request.get_json(silent=True) or {})}
         token = data.get("token")
         scan_id = data.get("scan_id") or request.headers.get("Idempotency-Key")
+        if jabo and doors and data.get("door") not in doors:   # not a gate: nothing charged
+            say(f"QR validate door={data.get('door')!r}: not one of --doors -> 404 unknown_door")
+            return jsonify(message="unknown_door"), 404
         ok, reason, note = charge(token, scan_id)
-        say(f"QR validate {token!r} door={data.get('door')} door_id={data.get('door_id')} "
+        say(f"QR validate {token!r} door={data.get('door')} "
             f"scan={scan_id} -> "
             f"{'ALLOW' if ok else 'DENY ' + str(reason)} {note}")
         if jabo:   # the backend ran /user/accesses for this door's service
             if ok:
                 return jsonify(message="Service unlocked"), 200
-            return jsonify(message=reason), 402 if reason == "insufficient_balance" else 403
+            if reason == "insufficient_balance":
+                return jsonify(message=reason), 402
+            return jsonify(message="invalid_token" if reason == "unknown_code" else reason), 403
         if reason == "insufficient_balance":
             return jsonify(allowed=False, reason=reason), 402
         return jsonify(allowed=ok, reason=reason)
@@ -324,6 +337,8 @@ def main():
                    help="/api/qr/validate answers like the Jabo Khotai backend")
     p.add_argument("--device-auth-code", default="dummy-device-code",
                    help="expected Device-Auth-Code on /api/qr/validate with --jabo")
+    p.add_argument("--facility", default=None,
+                   help="the node key's facility id: other facilities get 403")
     args = p.parse_args()
     tokens = args.token or DEFAULT_TOKENS
     print(f"Dummy backend on http://{args.host}:{args.port}  (dashboard at /)\n"
@@ -333,7 +348,7 @@ def main():
     create_app(args.key, tokens, args.auth_code, args.data, args.outage,
                balance=args.balance, camera_doors=args.camera_doors,
                jabo=args.jabo, device_auth_code=args.device_auth_code,
-               doors=args.doors).run(
+               doors=args.doors, facility=args.facility).run(
         host=args.host, port=args.port, threaded=True)
 
 

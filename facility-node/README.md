@@ -63,7 +63,7 @@ Inside the Pi, a single Python service (`facility-node`, run by systemd). Each f
 ```
  1 door/    Flask /qr /facility/open ──► DoorController (one per door) ──► Relay (KC868 HTTP)
                                             │  QR: local cache ⇄ optional QR API
-            threads: exit-input poller · reed watcher · door ticker · token pull (5 min)
+            threads: exit-input poller · reed watcher · door ticker · settings pull (5 min)
  2 camera/  threads: camera probe (30 s) · frame check (5 min) · snapshot on door alerts
  3 odour/   thread:  sensor loop (60 s): ENS160/AHT20 (I2C or WiFi board) [+ MQ] → TVOC score → odour monitor
 
@@ -184,7 +184,7 @@ Every API call carries a fresh `scan_id`. A scanner repeating the same code at t
 
 ### 5.2 Facility app
 
-`POST /facility/open {authCode, door}` → the Auth Code is compared with the hash the backend sent (`authCode` in the token pull); until the Pi has one, with `DEVICE_AUTH_CODE` from `.env` (the same per-facility code) → `attendant`. `door` (`male` / `female`, or the door's device id) picks the relay.
+`POST /facility/open {authCode, door}` → the Auth Code is compared with the hash the backend sent (`authCode` in the settings pull); until the Pi has one, with `DEVICE_AUTH_CODE` from `.env` (the same per-facility code) → `attendant`. `door` (`male` / `female`, or the door's device id) picks the relay.
 Five failures from one phone in 60 s → `429` for a minute.
 
 ### 5.3 Classifying a physical opening (reed switch)
@@ -220,11 +220,11 @@ All settings live in `/opt/facility-node/.env`, loaded by systemd. **`.env.examp
 
 | Function | Group | Keys | Notes |
 |---|---|---|---|
-| shared | Identity | `FACILITY_ID` | required |
+| shared | Identity | `FACILITY_ID` | required: the facility's id in the admin panel (a number, e.g. `995`); the backend refuses a different one |
 | shared | **Functions** | `ENABLE_DOORS`, `ENABLE_CAMERA`, `ENABLE_ODOUR` | `1` (default) / `0`; at least one on. An off function's keys below aren't required. `facility feature` |
 | shared | Device MAC | `DEVICE_MAC` | sent with the settings pull (`mac`) to match the Device List; empty = eth0's MAC |
 | shared | Device MAC checks | `RELAY_MAC`, `DOOR_<NAME>_SCANNER_MACS` (`SCANNER_MACS` for one door), `CAM_MAC` / `CAM_<NAME>_MAC`, `SENSOR_MAC` | each LAN device's MAC; a wrong one is blocked and alerted (`device_mismatch`). Empty = not checked. Fill with `facility macs save` on site |
-| shared | Backend | `ADMIN_URL`, `ADMIN_KEY`, `ADMIN_AUTH_HEADER`, `ADMIN_AUTH_SCHEME`, `SENSOR_PATH`, `DOOR_EVENT_PATH`, `ALERT_PATH`, `TOKENS_PATH` | URL and key required |
+| shared | Backend | `ADMIN_URL`, `ADMIN_KEY`, `ADMIN_AUTH_HEADER`, `ADMIN_AUTH_SCHEME`, `SENSOR_PATH`, `DOOR_EVENT_PATH`, `ALERT_PATH`, `TOKENS_PATH` | URL and key required. `ADMIN_KEY` = the node key (`fnk_…`) the admin panel shows once when the Pi is added. Paths default to `/gateway/facility-node/sensor`, `/door-event`, `/alert`, `/config` |
 | shared | Storage | `DB_PATH`, `MAX_QUEUE` | |
 | shared | Timing | `SENSOR_INTERVAL`, `PULL_INTERVAL`, `FLUSH_INTERVAL` | seconds |
 | shared | HTTP | `HOST`, `PORT` | |
@@ -233,7 +233,7 @@ All settings live in `/opt/facility-node/.env`, loaded by systemd. **`.env.examp
 | 1 Door | Door device id | `DOOR_<NAME>_ID` (`DOOR_ID` for one door) | the backend's device id for the door (gate), `BHU-<number>` e.g. `BHU-001`: its name and price come from the admin panel by this id; sent as `door` in QR checks, events and alerts (the Pi's door name until set) |
 | 1 Door | Unlock time | `UNLOCK_SECONDS` (all doors), `DOOR_<NAME>_UNLOCK_SECONDS` | 1–30 s, default 5; `facility door delay male 8` |
 | 1 Door | Reed | `REED`, `REED_ACTIVE_HIGH`, `PROPPED_THRESHOLD`, `PROPPED_REPEAT`, `CLASSIFY_WINDOW` | |
-| 1 Door | QR validation | `QR_API_URL`, `_METHOD`, `_ORDER`, `_TIMEOUT`, `_AUTH`, `_TOKEN_FIELD`, `_FACILITY_FIELD`, `_DOOR_FIELD`, `_EXTRA`, `_ALLOW_FIELD`, `_ALLOW_VALUES`, `_DENY_STATUS`, `_SCAN_ID_FIELD`, `_REASON_FIELD`, `QR_DEDUP_SECONDS` | off when `QR_API_URL` is empty; `QR_API_ORDER=api_only` = paid entry |
+| 1 Door | QR validation | `QR_API_URL`, `_METHOD`, `_ORDER`, `_TIMEOUT`, `_AUTH`, `_TOKEN_FIELD`, `_FACILITY_FIELD`, `_DOOR_FIELD`, `_EXTRA`, `_ALLOW_FIELD`, `_ALLOW_VALUES`, `_DENY_STATUS`, `_SCAN_ID_FIELD`, `_REASON_FIELD`, `QR_DEDUP_SECONDS` | off when `QR_API_URL` is empty; `QR_API_ORDER=api_only` = paid entry. `.env.example` is set up for the Jabo Khotai backend (`/qr/validate`, `api_only`, `message`) |
 | 1 Door | QR device auth | `QR_API_AUTH_HEADER`, `DEVICE_AUTH_CODE` | e.g. `Device-Auth-Code`: the QR check sends the facility's Device Auth Code (secret, required once the header is set) instead of the admin key. `DEVICE_AUTH_CODE` is also the Facility app's code until the backend pull sends `authCode` |
 | 1 Door | Attendant purposes | `ATTENDANT_PURPOSES` | what personal use may be for; default `cleaning,bath,toilet,maintenance` |
 | 1 Door | Scanner messages | `SCANNER_MSG_OPENED`, `_NO_BALANCE`, `_OFFLINE`, `_DENIED`, `_ERROR` | what the scanner shows; English defaults. `SCANNER_MSG_OPENED` may use `{price}` and `{door}` |
@@ -242,7 +242,7 @@ All settings live in `/opt/facility-node/.env`, loaded by systemd. **`.env.examp
 | 2 Camera | Several cameras | `CAMERAS`, `CAM_<NAME>_HOST`, `CAM_<NAME>_PORT`, `CAM_<NAME>_RTSP` | replaces the single camera; `facility camera setup <name>` |
 | 2 Camera | Camera's doors | `CAM_<NAME>_DOORS` (`CAM_DOORS` for the single camera) | doors that camera pictures, e.g. `male,female`; one camera per door. Unset = the door with the camera's name; a single camera covers every door. The admin panel overrides it (`cameraDoors`, section 8) |
 | 2 Camera | Health checks | `CAM_MONITOR` | `1` (default); `0` = no reachability / frozen-feed checks, alert snapshots still taken |
-| 2 Camera | Snapshots | `SNAPSHOT_DIR`, `SNAPSHOT_UPLOAD_PATH`, `SNAPSHOT_KEEP_DAYS` | upload off when the path is empty |
+| 2 Camera | Snapshots | `SNAPSHOT_DIR`, `SNAPSHOT_UPLOAD_PATH`, `SNAPSHOT_KEEP_DAYS` | upload off when the path is empty (`.env.example`: `/gateway/facility-node/snapshot`) |
 | 3 Odour | Air sensor board | `SENSOR_URL`, `SENSOR_TIMEOUT` | empty URL = ENS160/AHT20 on the Pi's I2C; set with `facility sensor enable` |
 | 3 Odour | Odour alert | `ODOUR_TVOC_SCORE_LIMIT`, `ODOUR_TVOC_LIMIT`, `_AQI_LIMIT`, `_NH3_LIMIT`, `_H2S_LIMIT`, `ODOUR_HOLD`, `_REPEAT`, `_CLEAR_HOLD` | empty limit = metric off |
 | 3 Odour | MQ sensors | `MQ`, `ADS1115_ADDR`, `MQ135_CHANNEL`, `MQ136_CHANNEL`, `MQ135_R0`, `MQ136_R0`, `MQ_RL_KOHM`, `MQ_DIVIDER`, `MQ_VC` | R0 from `facility mq calibrate` |
@@ -262,18 +262,18 @@ Port 5454, **facility LAN only**: the firewall blocks everything else, and there
 | `POST /api/device/DoorHeart` | Scanner heartbeat (every 30 s) | anything | `200 {ok: true}`; opens nothing. `/health` → `doors.<door>.scanner_heartbeat` shows each scanner's last beat and `alive` (a beat in the last 2 min) |
 | `GET\|POST /qrscanner` | Legacy-format scanner | `?cardid=…` | always 200: `{status, access_granted}` |
 | `POST /rakindaqrscanner` | Rakinda scanner | `{SCode}` | `{ResultCode:"1"\|"0", Msg, Audio}` |
-| `POST /facility/open` | Facility app | `{authCode, door}` or headers `X-Auth-Code` + `X-Door` | `200` · `403` · `400 unknown_door` · `429` · `502` |
+| `POST /facility/open` | Facility app | `{authCode, door}` or headers `X-Auth-Code` + `X-Door`; `use`, `purpose`, `amount`, `attendant`, `attendant_id` | `200` · `403` · `400` (`reason`) · `429` · `502` |
 | `GET /facility/doors` | Facility app | header `X-Auth-Code` | `200 {doors: [{door, door_id, name, price, open}]}` · `403` · `429` |
 | `GET /health` | Ops | — | queue, tokens, last pull/flush, doors (with id, name, price), devices (MACs), camera, odour, qr_api |
 | `POST /door/opened?door=…` / `/door/closed?door=…` | Bench tests | — | only if `DOOR_TEST_ENDPOINTS=1` |
 
 `door` in `POST /facility/open` is the Pi's door name (`male`) or the door's device id (`DOOR_<NAME>_ID`). `GET /facility/doors` gives the app its buttons, with names and prices from the last settings pull, so it works offline; the Auth Code is accepted only as a header (a query string would be logged).
 
-`POST /facility/open` also takes `use` = `customer` (cash at the counter, optional `amount`) or `personal` (with `purpose`, one of `ATTENDANT_PURPOSES`, **and** `attendant`), and `attendant` (who pressed it; optional for customer use). Also as headers `X-Use`, `X-Purpose`, `X-Attendant`. A bad value → `400` with `reason` `bad_use` / `bad_purpose` / `bad_amount` / `no_attendant`; no `use` = an older app, accepted.
+`POST /facility/open` also takes `use` = `customer` (cash at the counter, optional `amount`) or `personal` (with `purpose`, one of `ATTENDANT_PURPOSES`, **and** both `attendant` and `attendant_id`), plus `attendant` (who pressed it: name) and `attendant_id` (their backend user id, a positive whole number), both optional for customer use. Also as headers `X-Use`, `X-Purpose`, `X-Attendant`, `X-Attendant-Id`. A bad value → `400` with `reason` `bad_use` / `bad_purpose` / `bad_amount` / `bad_attendant_id` / `no_attendant`; no `use` = an older app, accepted.
 
 A scan from a scanner IP whose MAC doesn't match `DOOR_<NAME>_SCANNER_MACS` is refused (`403`, `reason: device_mismatch`) and alerted.
 
-Scan replies also say why, for scanners with a display: `/qr` adds `reason` and `message`, `/qrscanner` adds `message`, and the Rakinda reply's `Msg` is the message. The message comes from the reason: opened, `insufficient_balance` (also `insufficient_funds`, `no_balance`, `low_balance`) → no balance, `offline` → no internet, `relay_error` → door error, anything else → access denied. Each text is set with `SCANNER_MSG_*`.
+Scan replies also say why, for scanners with a display: `/qr` adds `reason` and `message`, `/qrscanner` adds `message`, and the Rakinda reply's `Msg` is the message. The message comes from the reason: opened, `insufficient_balance` (also `insufficient_funds`, `no_balance`, `low_balance`) → no balance, `offline` → no internet, `relay_error` and `setup_error` (the backend refused this Pi's Device Auth Code or door id) → door error, anything else → access denied. Each text is set with `SCANNER_MSG_*`.
 
 With `ENABLE_DOORS=0` every door endpoint answers `404 {"result": "doors_off"}`. `/health` always answers and includes `features: {doors, camera, odour}`; a function that is off shows `null` (camera, odour) or `{}` (doors).
 
@@ -281,7 +281,16 @@ With `ENABLE_DOORS=0` every door endpoint answers `404 {"result": "doors_off"}`.
 
 ## 8. Backend API contract
 
-All calls go **Pi → backend**, with header `ADMIN_AUTH_HEADER: ADMIN_AUTH_SCHEME ADMIN_KEY` (default `Authorization: Bearer <key>`). Timestamps are ISO 8601 UTC (`2026-10-02T10:15:00Z`).
+All calls go **Pi → backend**, with header `ADMIN_AUTH_HEADER: ADMIN_AUTH_SCHEME ADMIN_KEY` (default `Authorization: Bearer <node key>`). The backend checks that the key belongs to the `facility` in the body (else `403`). Timestamps are ISO 8601 UTC (`2026-10-02T10:15:00Z`). Pushes are answered `200 {"ok": true}`, or `{"ok": true, "duplicate": true}` for a repeated `id`; both mean delivered.
+
+| Call | Default path (under `ADMIN_URL`) |
+|---|---|
+| Settings pull | `GET /gateway/facility-node/config` (`TOKENS_PATH`) |
+| Sensor push | `POST /gateway/facility-node/sensor` (`SENSOR_PATH`) |
+| Door-event push | `POST /gateway/facility-node/door-event` (`DOOR_EVENT_PATH`) |
+| Alert push | `POST /gateway/facility-node/alert` (`ALERT_PATH`) |
+| Snapshot upload | `POST /gateway/facility-node/snapshot` (`SNAPSHOT_UPLOAD_PATH`, `.env.example`) |
+| QR check + charge | `POST /qr/validate` (`QR_API_URL`, `.env.example`), header `Device-Auth-Code` |
 
 **Every pushed item carries a unique `id` (UUID)**, in the body and as the `Idempotency-Key` header. A retry after a lost reply resends the **same** `id`, so the backend must store the id and treat a repeat as success without saving it twice: reply 2xx and skip it.
 
@@ -290,7 +299,7 @@ All calls go **Pi → backend**, with header `ADMIN_AUTH_HEADER: ADMIN_AUTH_SCHE
 ### Push sensor: `POST SENSOR_PATH` (every 60 s)
 
 ```json
-{"id": "7f3c…", "facility": "facility-001", "ts": "…Z",
+{"id": "7f3c…", "facility": "995", "ts": "…Z",
  "tvoc": 120, "tvoc_score": 11, "tvoc_level": "very_good",
  "eco2": 450, "aqi": 2, "temperature": 28.4, "humidity": 71.2,
  "nh3_ppm": 3.1, "h2s_ppm": 0.2,
@@ -303,12 +312,12 @@ Values are `null` when a sensor is warming up, failed, or not fitted. `tvoc_scor
 
 `cameras` has every camera by name (the single-camera setup is named `main`); `camera` repeats the first one for backends that predate several cameras. With `CAM_MONITOR=0` the camera values stay `null`.
 
-`devices` lists every LAN device the Pi talks to, for the Device List: `{"relay": {"ip": "192.168.10.174", "mac": "2c:bc:bb:bf:70:a3", "expected": ["2c:bc:bb:bf:70:a3"], "ok": true}, "scanner_male": {…}, "camera_main": {…}, "sensor_board": {…}}`. `ok` is `false` for a wrong MAC (that device is blocked) and `null` when no MAC is set in `.env` (reported, not checked). A camera with a wrong MAC also shows `"mac_ok": false` in `cameras`.
+`devices` lists every LAN device the Pi talks to, for the Device List: `{"relay": {"ip": "192.168.10.174", "mac": "2c:bc:bb:bf:70:a3", "expected": ["2c:bc:bb:bf:70:a3"], "ok": true, "reachable": true}, "scanner_male": {…}, "camera_main": {…}, "sensor_board": {…}}`. `ok` is `false` for a wrong MAC (that device is blocked) and `null` when no MAC is set in `.env` (reported, not checked); `expected` is then `null` too. `reachable` is checked just before each push: a TCP connect to the device's port (relay, camera, sensor board), a heartbeat in the last 2 min or else a ping (QR scanners); `null` until the first check. The backend raises device-offline alerts from it. A camera with a wrong MAC also shows `"mac_ok": false` in `cameras`.
 
 ### Push door-event: `POST DOOR_EVENT_PATH` (per event)
 
 ```json
-{"id": "b21e…", "facility": "facility-001", "door": "BHU-001", "type": "entry", "ts": "…Z",
+{"id": "b21e…", "facility": "995", "door": "BHU-001", "type": "entry", "ts": "…Z",
  "scan_id": "…", "price": 10}
 ```
 
@@ -317,16 +326,16 @@ Values are `null` when a sensor is warming up, failed, or not fitted. `tvoc_scor
 | `type` | Extra fields |
 |---|---|
 | `entry` | QR entry; `scan_id` and `price` (the door's price at that moment) when the backend approved and charged it (none for a cached or Pi-made staff code) |
-| `attendant` | Facility app. `use`: `customer` (+ `payment: "cash"`, `amount`, `price`?, `price_mismatch`?, `attendant`?) or `personal` (+ `purpose`: `cleaning` \| `bath` \| `toilet` \| `maintenance`, + `attendant`, required). Cash: no `amount` = the door's price; an amount other than the price still opens, with `price_mismatch: true` |
+| `attendant` | Facility app. `use`: `customer` (+ `payment: "cash"`, `amount`, `price`?, `price_mismatch`?, `attendant`?, `attendant_id`?) or `personal` (+ `purpose`: `cleaning` \| `bath` \| `toilet` \| `maintenance`, + `attendant` and `attendant_id`, required). Cash: no `amount` = the door's price; an amount other than the price still opens, with `price_mismatch: true` |
 | `exit` | exit button pressed (no extra fields) |
-| `denied` | QR: `reason` (`unknown`, `api_denied`, `offline`, `empty`), plus `api_reason` and `scan_id` when the backend refused. Facility app (wrong Auth Code): no `reason` |
+| `denied` | QR: `reason` (`unknown`, `api_denied`, `offline`, `setup_error`, `empty`), plus `api_reason` and `scan_id` when the backend refused (`setup_error`: the backend refused the Pi's Device Auth Code or door id, `api_reason` `invalid_device_code` / `unknown_door`). Facility app (wrong Auth Code): no `reason` |
 | `relay_failed` | `scan_id` (a charged QR scan) or the cash-sale fields (`use: customer`, `payment`, `amount`): it was paid but the relay failed: **refund / void it** |
 | `door_closed` | `duration_s` |
 
 ### Push alert: `POST ALERT_PATH` (per anomaly)
 
 ```json
-{"id": "c9a0…", "facility": "facility-001", "door": "BHU-002", "type": "anomaly", "subtype": "propped_open",
+{"id": "c9a0…", "facility": "995", "door": "BHU-002", "type": "anomaly", "subtype": "propped_open",
  "ts": "…Z", "duration_s": 300, "repeat": false,
  "snapshot": "20261002T101500Z-female.jpg", "camera": "female"}
 ```
@@ -340,12 +349,12 @@ Values are `null` when a sensor is warming up, failed, or not fitted. `tvoc_scor
 | `odour_resolved` | `duration_s`, `readings` | All-clear |
 | `device_mismatch` | `device` (`relay`, `scanner_male`, `camera_main`, `sensor_board`…), `ip`, `expected` (MACs), `seen` (MAC or `null`), `door` for a scanner | Alarm: another device is on that IP; it is blocked. Repeated at most every 10 min while it lasts |
 
-### Pull tokens: `GET TOKENS_PATH?facility=<id>&mac=<mac>` (every 5 min)
+### Settings pull: `GET TOKENS_PATH?facility=<id>&mac=<mac>` (every 5 min)
 
 `mac` is this Pi's MAC address (`DEVICE_MAC`, default eth0's, lower case with colons, e.g. `2c:cf:67:01:a7:ea`), so the backend can match it with the MAC in the Device List. Left out when the Pi can't read one.
 
 ```json
-{"facilityId": "facility-001", "authCode": "<facility app auth code>",
+{"facilityId": "995", "authCode": "<facility app auth code>",
  "doors": {"BHU-001": {"name": "Gents Toilet", "price": 10},
            "BHU-002": {"name": "Ladies Toilet", "price": 10}},
  "cameraDoors": {"main": ["BHU-001", "BHU-002"]}}
@@ -355,11 +364,11 @@ Values are `null` when a sensor is warming up, failed, or not fitted. `tvoc_scor
 
 `cameraDoors` (optional) is the admin panel's choice of which camera pictures which door: camera name (as in `CAMERAS`, or `main` for a single camera) or camera IP → list of doors, by door device id (the Pi's door names also work). One camera per door; a door left out gets no picture. When present it replaces the `.env` links (`CAM_<NAME>_DOORS`) and is kept on the Pi across reboots; missing, `null` or `{}` = use `.env`. A reply that names an unknown camera or door, or gives a door two cameras, is ignored (logged) and `.env` is used. Camera logins never come from the backend.
 
-`tokens` (optional, older setups only; Jabo Khotai entry doesn't use it) replaces the offline QR cache, so an empty or missing list revokes everything. `expiresAt` can be ISO 8601, unix seconds or milliseconds, or null. A reply for a different `facilityId` is ignored. If the pull fails, the cache is kept.
+`authCode` missing = keep the last one. `tokens` (optional, older setups only; the facility-node backend doesn't send it) replaces the offline QR cache, so an empty list revokes everything; missing = the cache is left alone. `expiresAt` can be ISO 8601, unix seconds or milliseconds, or null. A reply for a different `facilityId` is ignored. If the pull fails, the cache is kept.
 
 ### Optional: QR validation (`QR_API_URL`)
 
-Default request: `POST {"token": "…", "facility": "facility-001", "door": "BHU-001", "scan_id": "<uuid>"}` (`door` = the door's device id, `DOOR_<NAME>_ID`; the backend finds the door's service and price by it), with header `Idempotency-Key: <scan_id>`. `scan_id` is a new random id per scan, not a credential: a repeat with the same id must not charge again, and a `relay_failed` event names it for the refund. Default reply: `{"allowed": true}`, or `{"allowed": false, "reason": "insufficient_balance"}` (HTTP 200 or 402).
+Default request: `POST {"token": "…", "facility": "995", "door": "BHU-001", "scan_id": "<uuid>"}` (`door` = the door's device id, `DOOR_<NAME>_ID`; the backend finds the door's service and price by it), with header `Idempotency-Key: <scan_id>`. `scan_id` is a new random id per scan, not a credential: a repeat with the same id must not charge again, and a `relay_failed` event names it for the refund. Default reply: `{"allowed": true}`, or `{"allowed": false, "reason": "insufficient_balance"}` (HTTP 200 or 402).
 
 **Paid entry (`QR_API_ORDER=api_only`), what the backend must do:**
 - Check the balance and **charge in the same call**, then reply `allowed`.
@@ -369,13 +378,13 @@ Default request: `POST {"token": "…", "facility": "facility-001", "door": "BHU
 
 `dev/dummy_backend.py` does all of this (`--balance N`), for testing.
 
-The method, field names, extra fields, reply field, allow values and deny status codes are all configurable (`QR_API_*`). A timeout, network error, 5xx or 401 means "unavailable", and the cache decides (401 is logged as "credentials refused": the Pi's key or Device Auth Code, not the person's code).
+The method, field names, extra fields, reply field, allow values and deny status codes are all configurable (`QR_API_*`). A timeout, network error or 5xx (including `503 processing`) means "unavailable", and the cache decides; with `api_only` the scan is refused (`offline`). A `401` (`invalid_device_code`) or a refusal saying `unknown_door` is the Pi's setup, not the person's code: logged as an error, shown by `facility doctor`, the cache decides as for "unavailable", and with `api_only` the scan is refused as `setup_error` (the scanner asks for the attendant).
 
-**Jabo Khotai backend** (the customer app shows the QR): the Pi sends the default request to `POST {ADMIN_URL}/qr/validate` with header `Device-Auth-Code: <facility's code>` instead of the admin key. The backend finds the door's `service_id` and `gender` from `facility` + `door`, runs its `/user/accesses` logic with the `token` (charging each `scan_id` once), and answers `200 {"message": "Service unlocked"}` to open. Anything else keeps the door shut: a refusal is a 4xx (`402` no balance, `403` invalid / used code…) with the reason in `message`, which the Pi logs as `api_reason`. Settings: the Jabo Khotai block in `.env.example`, or SETUP.md section 4.6. `dev/dummy_backend.py --jabo` answers the same way, for testing. **[SETUP.md](SETUP.md) section 4.6** shows how to match an existing backend.
+**Jabo Khotai backend** (the customer app shows the QR): the Pi sends the default request to `POST {ADMIN_URL}/qr/validate` with header `Device-Auth-Code: <facility's code>` instead of the admin key. The backend finds the door's `service_id` and `gender` from `facility` + `door`, runs its `/user/accesses` logic with the `token` (charging each `scan_id` once), and answers `200 {"message": "Service unlocked"}` to open. Anything else keeps the door shut: a refusal is a 4xx with the reason in `message` (`402 insufficient_balance`, `403 invalid_token` / `user_blocked`, `400 recent_usage`, `404 unknown_door`), which the Pi logs as `api_reason`. Settings: the Jabo Khotai block in `.env.example`, or SETUP.md section 4.6. `dev/dummy_backend.py --jabo` answers the same way, for testing. **[SETUP.md](SETUP.md) section 4.6** shows how to match an existing backend.
 
 ### Optional: snapshot upload (`SNAPSHOT_UPLOAD_PATH`)
 
-Multipart `POST` with field `file` (image/jpeg) plus form fields `id`, `facility`, `name`, `ts` and `camera` (the camera's name). It's queued **before** its alert, so the image arrives first. The alert's `snapshot` equals `name`, and its `camera` names the camera that took it (the camera responsible for that door).
+Multipart `POST` with field `file` (image/jpeg, at most 4 MB) plus form fields `id`, `facility`, `name`, `ts` and `camera` (the camera's name). It's queued **before** its alert, so the image arrives first. The alert's `snapshot` equals `name`, and its `camera` names the camera that took it (the camera responsible for that door).
 
 ### Retry rules (all pushes)
 
@@ -470,7 +479,7 @@ The test suite fakes the relay, the backend and the clock. It covers:
 
 **Run the whole node locally against fakes:** start `dev/dummy_qr_api.py` (QR API on :8090), point `RELAY_URL` / `ADMIN_URL` at local stubs, set `HOST=127.0.0.1` and `CAM_RTSP=`, then run `python app.py`. The sensors log I2C errors and report `null`, which is expected off-Pi.
 
-**Dummy admin backend:** `python3 dev/dummy_backend.py` serves all the backend APIs on :8091 (token pull, sensor, door-event, alert, snapshot, QR validate). It checks auth, rejects missing fields with 422, ignores duplicate ids, and can simulate an outage. Open `http://127.0.0.1:8091/` for a live dashboard of everything the node sent. Point a node at it with `ADMIN_URL=http://127.0.0.1:8091/api` and `ADMIN_KEY=dummy-key`.
+**Dummy admin backend:** `python3 dev/dummy_backend.py` serves all the backend APIs on :8091 at the real paths (settings pull, sensor, door-event, alert, snapshot, QR validate). It checks the node key (and the facility with `--facility`), rejects missing fields with 422, ignores duplicate ids, and can simulate an outage. `--jabo` answers like the real backend (no tokens, `Service unlocked`, reason codes). Open `http://127.0.0.1:8091/` for a live dashboard of everything the node sent. Point a node at it with `ADMIN_URL=http://127.0.0.1:8091/api` and `ADMIN_KEY=dummy-key`.
 
 **Dummy QR codes:** `dev/qr/DUMMY-ALLOW-*.png` are approved by the dummy API, and `DUMMY-DENY-0001.png` is refused. Regenerate them with `python dev/make_dummy_qr.py`.
 
@@ -483,7 +492,7 @@ facility-node/
 ├── app.py              (shared) Flask endpoints, starts each function's jobs, entry point
 ├── config.py           (shared) Settings from .env: function switches, validation, door map
 ├── store.py            (shared) SQLite: tokens, Pi-made codes, Auth Code hash, outbox
-├── uplink.py           (shared) Backend client: queue-first pushes, snapshot upload, token pull
+├── uplink.py           (shared) Backend client: queue-first pushes, snapshot upload, settings pull
 ├── doctor.py           (shared) Installation self-check, per function
 ├── netcheck.py         (shared) Device MAC checks (ARP), `facility macs`
 ├── door/               1. Door lock / unlock
@@ -534,10 +543,6 @@ facility-node/
 
 | Item | Status |
 |---|---|
-| Backend API paths and auth header | Defaults are placeholders; set `*_PATH` / `ADMIN_AUTH_*` |
-| Backend `authCode` in the token pull | Needed for Facility-app unlock |
-| Backend accepts `door`, `reason`, `nh3_ppm`, `h2s_ppm`, odour alerts | Additive fields |
-| QR validation API | Optional; configure `QR_API_*` when it exists |
-| Snapshot upload endpoint | Optional; set `SNAPSHOT_UPLOAD_PATH` |
+| Facility-node backend | Built on the backend branch `feature/facility-node-api` (report `FACILITY_NODE_FEATURE_REPORT.md`); paths are now the defaults. Not yet deployed or tested against a Pi |
 | Scanner output format | `/qr`, `/qrscanner` and `/rakindaqrscanner` all accepted; remove the unused ones once known |
 | Hardware validation | I2C sensor reads, gpiozero reed, ffmpeg camera checks and the installer still need a run on a real Pi 5 |

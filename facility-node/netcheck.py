@@ -11,6 +11,10 @@ open a door. A wrong MAC blocks that device and raises a device_mismatch alert.
 This stops casual impersonation and wiring mix-ups. A MAC can be faked, so a
 strong relay password and a separate customer WiFi still matter.
 
+Once a minute (with the sensor push) sweep() also asks whether each device
+answers at all ("reachable"), so the backend can raise device-offline alerts:
+a TCP connect to its port, a fresh heartbeat for a QR scanner, else a ping.
+
     facility macs          the MAC seen for every configured device
     facility macs save     write those MACs into .env (asks first; needs sudo)
 """
@@ -49,12 +53,15 @@ def arp_table(path=ARP):
 
 def tcp_touch(ip, port, timeout=1.0):
     """Open and close a TCP connection, so the kernel learns the device's MAC.
-    Nothing is sent, so no password leaves the Pi before the MAC is checked."""
+    Nothing is sent, so no password leaves the Pi before the MAC is checked.
+    -> True when the device answered (a refused connection is an answer too)."""
     try:
         with socket.create_connection((ip, port), timeout=timeout):
-            pass
+            return True
+    except ConnectionRefusedError:
+        return True
     except OSError:
-        pass
+        return False
 
 
 def host_port(url, default_port=80):
@@ -73,15 +80,18 @@ class MacGuard:
     """
 
     def __init__(self, settings, uplink=None, arp=arp_table, touch=tcp_touch,
-                 clock=time.time, realert=600):
+                 clock=time.time, realert=600, ping=None, heartbeat_stale=120):
         self.s = settings
         self.uplink = uplink
         self.arp = arp
         self.touch = touch
+        self.ping = ping or ping_ok
         self.clock = clock
         self.realert = realert
+        self.heartbeat_stale = heartbeat_stale
         self.devices = {}         # name -> {"ip", "macs", "port", "section", "env_key"}
-        self._seen = {}           # name -> {"mac", "ok", "checked_at"}
+        self._seen = {}           # name -> {"mac", "ok", "checked_at", "reachable"}
+        self._heard = {}          # ip -> last heartbeat from a genuine scanner
         self._alerted = {}        # (name, mac) -> ts
         self._lock = threading.Lock()
 
@@ -103,7 +113,7 @@ class MacGuard:
             seen = self.arp().get(ip)
         ok = None if not dev["macs"] else seen in dev["macs"]
         with self._lock:
-            self._seen[name] = {"mac": seen, "ok": ok, "checked_at": self.clock()}
+            self._seen.setdefault(name, {}).update(mac=seen, ok=ok, checked_at=self.clock())
         if ok is False:
             self._mismatch(name, dev, ip, seen)
         return ok is not False
@@ -127,9 +137,36 @@ class MacGuard:
             payload["door"] = dev["section"]
         self.uplink.enqueue("alert", payload)
 
+    def heard(self, ip):
+        """A scanner's heartbeat: it is up. Counted only from the wired-in
+        scanner (MAC check), so a laptop can't keep a dead scanner "online"."""
+        name = scanner_name(self, ip)
+        if name is not None and self.check(name, ip):
+            with self._lock:
+                self._heard[ip] = self.clock()
+
+    def sweep(self):
+        """Probe every device once: reachable, then its MAC re-checked (which
+        alerts a swapped device even while nothing uses it). Takes up to about
+        a second per device that doesn't answer."""
+        for name, dev in list(self.devices.items()):
+            with self._lock:
+                beat = self._heard.get(dev["ip"])
+            if beat is not None and self.clock() - beat <= self.heartbeat_stale:
+                up = True
+            elif dev["port"]:
+                up = self.touch(dev["ip"], dev["port"])
+            else:
+                up = self.ping(dev["ip"])
+            with self._lock:
+                self._seen.setdefault(name, {})["reachable"] = up
+            if up:
+                self.check(name)
+
     def state(self):
-        """{name: {ip, mac, expected, ok}} for the sensor push and /health.
-        ok: true / false, or null when no MAC is set (reported, not checked)."""
+        """{name: {ip, mac, expected, ok, reachable}} for the sensor push and /health.
+        ok: true / false, or null when no MAC is set (reported, not checked).
+        reachable: true / false from the last sweep, null before the first one."""
         table = self.arp()
         with self._lock:
             seen = dict(self._seen)
@@ -140,7 +177,7 @@ class MacGuard:
             ok = None if not dev["macs"] else (last["ok"] if "ok" in last
                                                else (mac in dev["macs"] if mac else None))
             out[name] = {"ip": dev["ip"], "mac": mac, "expected": list(dev["macs"]) or None,
-                         "ok": ok}
+                         "ok": ok, "reachable": last.get("reachable")}
         return out
 
     def verifier(self, name):
@@ -196,6 +233,15 @@ def set_env_keys(path, values):
 
 def ping(ip):
     subprocess.run(["ping", "-c1", "-W1", ip], capture_output=True)
+
+
+def ping_ok(ip):
+    """One ping -> True / False; None when ping can't run (unknown, not down)."""
+    try:
+        return subprocess.run(["ping", "-c1", "-W1", ip], capture_output=True,
+                              timeout=3).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return None
 
 
 def main(argv=None):
