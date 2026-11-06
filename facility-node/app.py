@@ -333,6 +333,14 @@ def create_app(settings, doors, store, uplink, cameras=(), limiter=None, odour=N
         door = named_door(request.headers.get("X-Door") or data.get("door"))
         fields, error = attendant_fields(data, request.headers, settings.attendant_purposes)
         if error:
+            # Which field the app got wrong; the Auth Code is never logged
+            log.info("Facility app refused (%s) from %s: use=%r purpose=%r attendant=%s "
+                     "attendant_id=%r", error, request.remote_addr,
+                     data.get("use", request.headers.get("X-Use")),
+                     data.get("purpose", request.headers.get("X-Purpose")),
+                     "given" if (data.get("attendant") or request.headers.get("X-Attendant"))
+                     else "missing",
+                     data.get("attendant_id", request.headers.get("X-Attendant-Id")))
             g.bad_request = error
             return reply("bad_request")
         return unlock(door, "facility_open", code, **fields)

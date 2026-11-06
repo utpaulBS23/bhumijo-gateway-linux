@@ -2325,6 +2325,14 @@ class AttendantUseTests(unittest.TestCase):
             self.assertEqual((r.status_code, r.json["reason"]), (400, why), body)
         self.assertEqual((self.relay.fired, self.up.of("door_event")), ([], []))
 
+    def test_bad_request_logs_why_not_the_code(self):
+        with self.assertLogs("app", "INFO") as logs:
+            self.open(use="personal", purpose="bath", attendant="Rahim")
+        line = "\n".join(logs.output)
+        self.assertIn("no_attendant", line)
+        self.assertIn("attendant_id=None", line)
+        self.assertNotIn("auth-code-123", line)
+
     def test_headers_and_older_app(self):
         r = self.c.post("/facility/open", headers={"X-Auth-Code": "auth-code-123", "X-Door": "female",
                                                     "X-Use": "personal", "X-Purpose": "cleaning",
