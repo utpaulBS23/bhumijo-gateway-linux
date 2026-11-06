@@ -2334,6 +2334,12 @@ class AttendantUseTests(unittest.TestCase):
         self.assertIn("attendant_id=None", line)
         self.assertNotIn("auth-code-123", line)
 
+    def test_unknown_door_is_logged(self):
+        with self.assertLogs("app", "INFO") as logs:
+            r = self.open(door="BHU-999", use="customer")
+        self.assertEqual((r.status_code, r.json["result"]), (400, "unknown_door"))
+        self.assertIn("unknown door 'BHU-999'", "\n".join(logs.output))
+
     def test_headers_and_older_app(self):
         r = self.c.post("/facility/open", headers={"X-Auth-Code": "auth-code-123", "X-Door": "female",
                                                     "X-Use": "personal", "X-Purpose": "cleaning",

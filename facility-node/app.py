@@ -330,7 +330,13 @@ def create_app(settings, doors, store, uplink, cameras=(), limiter=None, odour=N
     def facility_open():
         data = body()
         code = request.headers.get("X-Auth-Code") or data.get("authCode")
-        door = named_door(request.headers.get("X-Door") or data.get("door"))
+        asked = request.headers.get("X-Door") or data.get("door")
+        door = named_door(asked)
+        if door is None:
+            log.info("Facility app: unknown door %r from %s (this Pi knows %s)", asked,
+                     request.remote_addr,
+                     ", ".join(f"{d.name}" + (f"/{d.door.door_id}" if d.door.door_id else "")
+                               for d in doors))
         fields, error = attendant_fields(data, request.headers)
         if error:
             # Which field the app got wrong; the Auth Code is never logged
