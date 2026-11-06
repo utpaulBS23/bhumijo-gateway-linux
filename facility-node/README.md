@@ -235,7 +235,6 @@ All settings live in `/opt/facility-node/.env`, loaded by systemd. **`.env.examp
 | 1 Door | Reed | `REED`, `REED_ACTIVE_HIGH`, `PROPPED_THRESHOLD`, `PROPPED_REPEAT`, `CLASSIFY_WINDOW` | |
 | 1 Door | QR validation | `QR_API_URL`, `_METHOD`, `_ORDER`, `_TIMEOUT`, `_AUTH`, `_TOKEN_FIELD`, `_FACILITY_FIELD`, `_DOOR_FIELD`, `_EXTRA`, `_ALLOW_FIELD`, `_ALLOW_VALUES`, `_DENY_STATUS`, `_SCAN_ID_FIELD`, `_REASON_FIELD`, `QR_DEDUP_SECONDS` | off when `QR_API_URL` is empty; `QR_API_ORDER=api_only` = paid entry. `.env.example` is set up for the Jabo Khotai backend (`/qr/validate`, `api_only`, `message`) |
 | 1 Door | QR device auth | `QR_API_AUTH_HEADER`, `DEVICE_AUTH_CODE` | e.g. `Device-Auth-Code`: the QR check sends the facility's Device Auth Code (secret, required once the header is set) instead of the admin key. `DEVICE_AUTH_CODE` is also the Facility app's code until the backend pull sends `authCode` |
-| 1 Door | Attendant purposes | `ATTENDANT_PURPOSES` | what personal use may be for; default `cleaning,bath,toilet,maintenance` |
 | 1 Door | Scanner messages | `SCANNER_MSG_OPENED`, `_NO_BALANCE`, `_OFFLINE`, `_DENIED`, `_ERROR` | what the scanner shows; English defaults. `SCANNER_MSG_OPENED` may use `{price}` and `{door}` |
 | 1 Door | Bench test | `DOOR_TEST_ENDPOINTS` | keep `0` in production |
 | 2 Camera | Camera | `CAM_HOST`, `CAM_PORT`, `CAM_RTSP`, `CAM_PROBE_INTERVAL`, `CAM_FRAME_INTERVAL` | one camera; set with `facility camera` |
@@ -269,7 +268,7 @@ Port 5454, **facility LAN only**: the firewall blocks everything else, and there
 
 `door` in `POST /facility/open` is the Pi's door name (`male`) or the door's device id (`DOOR_<NAME>_ID`). `GET /facility/doors` gives the app its buttons, with names and prices from the last settings pull, so it works offline; the Auth Code is accepted only as a header (a query string would be logged).
 
-`POST /facility/open` also takes `use` = `customer` (cash at the counter, optional `amount`) or `personal` (with `purpose`, one of `ATTENDANT_PURPOSES`, **and** both `attendant` and `attendant_id`), plus `attendant` (who pressed it: name) and `attendant_id` (their backend user id, a positive whole number), both optional for customer use. Also as headers `X-Use`, `X-Purpose`, `X-Attendant`, `X-Attendant-Id`. A bad value → `400` with `reason` `bad_use` / `bad_purpose` / `bad_amount` / `bad_attendant_id` / `no_attendant`; no `use` = an older app, accepted.
+`POST /facility/open` also takes `use` = `customer` (cash at the counter, optional `amount`) or `personal` (with `purpose`, any text such as `cleaning` (up to 64 characters), **and** both `attendant` and `attendant_id`), plus `attendant` (who pressed it: name) and `attendant_id` (their backend user id, a positive whole number), both optional for customer use. Also as headers `X-Use`, `X-Purpose`, `X-Attendant`, `X-Attendant-Id`. A bad value → `400` with `reason` `bad_use` / `bad_purpose` / `bad_amount` / `bad_attendant_id` / `no_attendant`; no `use` = an older app, accepted.
 
 A scan from a scanner IP whose MAC doesn't match `DOOR_<NAME>_SCANNER_MACS` is refused (`403`, `reason: device_mismatch`) and alerted.
 
@@ -326,7 +325,7 @@ Values are `null` when a sensor is warming up, failed, or not fitted. `tvoc_scor
 | `type` | Extra fields |
 |---|---|
 | `entry` | QR entry; `scan_id` and `price` (the door's price at that moment) when the backend approved and charged it (none for a cached or Pi-made staff code) |
-| `attendant` | Facility app. `use`: `customer` (+ `payment: "cash"`, `amount`, `price`?, `price_mismatch`?, `attendant`?, `attendant_id`?) or `personal` (+ `purpose`: `cleaning` \| `bath` \| `toilet` \| `maintenance`, + `attendant` and `attendant_id`, required). Cash: no `amount` = the door's price; an amount other than the price still opens, with `price_mismatch: true` |
+| `attendant` | Facility app. `use`: `customer` (+ `payment: "cash"`, `amount`, `price`?, `price_mismatch`?, `attendant`?, `attendant_id`?) or `personal` (+ `purpose`: text as the app sent it, e.g. `cleaning`, + `attendant` and `attendant_id`, required). Cash: no `amount` = the door's price; an amount other than the price still opens, with `price_mismatch: true` |
 | `exit` | exit button pressed (no extra fields) |
 | `denied` | QR: `reason` (`unknown`, `api_denied`, `offline`, `setup_error`, `empty`), plus `api_reason` and `scan_id` when the backend refused (`setup_error`: the backend refused the Pi's Device Auth Code or door id, `api_reason` `invalid_device_code` / `unknown_door`). Facility app (wrong Auth Code): no `reason` |
 | `relay_failed` | `scan_id` (a charged QR scan) or the cash-sale fields (`use: customer`, `payment`, `amount`): it was paid but the relay failed: **refund / void it** |

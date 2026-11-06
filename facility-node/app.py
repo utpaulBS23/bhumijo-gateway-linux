@@ -41,13 +41,14 @@ ATTENDANT_USES = ("customer", "personal")
 HEARTBEAT_STALE = 120
 
 
-def attendant_fields(data, headers, purposes):
+def attendant_fields(data, headers):
     """The Facility app's use / purpose / amount / attendant -> (fields, error).
 
-    error is None, or why the request is refused (400): bad_use, bad_purpose,
-    bad_amount, bad_attendant_id, no_attendant (personal use must give both the
-    attendant's name and backend user id). An app that sends no `use` at all is
-    accepted (older app).
+    error is None, or why the request is refused (400): bad_use, bad_purpose
+    (personal use without a purpose; any text is accepted, the backend owns
+    the list), bad_amount, bad_attendant_id, no_attendant (personal use must
+    give both the attendant's name and backend user id). An app that sends no
+    `use` at all is accepted (older app).
     """
     def get(key, header):
         v = headers.get(header) if headers.get(header) is not None else data.get(key)
@@ -63,10 +64,9 @@ def attendant_fields(data, headers, purposes):
         return None, "bad_use"
     fields = {"use": use}
     if use == "personal":
-        purpose = purpose.lower() if isinstance(purpose, str) else None
-        if purpose not in purposes:
+        if not (isinstance(purpose, str) and purpose):
             return None, "bad_purpose"
-        fields["purpose"] = purpose
+        fields["purpose"] = purpose[:64]
     elif amount not in (None, ""):
         try:
             amount = round(float(amount), 2)
@@ -331,7 +331,7 @@ def create_app(settings, doors, store, uplink, cameras=(), limiter=None, odour=N
         data = body()
         code = request.headers.get("X-Auth-Code") or data.get("authCode")
         door = named_door(request.headers.get("X-Door") or data.get("door"))
-        fields, error = attendant_fields(data, request.headers, settings.attendant_purposes)
+        fields, error = attendant_fields(data, request.headers)
         if error:
             # Which field the app got wrong; the Auth Code is never logged
             log.info("Facility app refused (%s) from %s: use=%r purpose=%r attendant=%s "

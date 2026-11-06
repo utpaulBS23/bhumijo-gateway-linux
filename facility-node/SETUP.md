@@ -524,12 +524,12 @@ Content-Type: application/json
 | `door` | `male` / `female`, or the door id (`BHU-002`) | Which door opens |
 | `use` | `customer` | A customer paid **cash** at the counter: logged as a cash sale |
 | | `personal` | The attendant's own use: needs `purpose` |
-| `purpose` | `cleaning`, `bath`, `toilet`, `maintenance` | Personal use only; the list is `ATTENDANT_PURPOSES` in `.env` |
+| `purpose` | Any text, e.g. `cleaning`, `bath` (up to 64 characters) | Personal use only; required there. The backend decides which values it accepts |
 | `amount` | number, optional | Customer use: the cash taken, for the backend's sales total |
 | `attendant` | text | Who pressed it: the attendant's name. **Required** for personal use |
 | `attendant_id` | whole number | The attendant's backend user id, so the backend files it under that user. **Required** for personal use |
 
-It works **offline**: the door opens on the Auth Code alone and the event reaches the backend later. A wrong `use`, a missing or unknown `purpose`, a bad `amount` or `attendant_id`, or personal use without both `attendant` and `attendant_id` gets `400` with `reason` (`bad_use`, `bad_purpose`, `bad_amount`, `bad_attendant_id`, `no_attendant`) and opens nothing. An older app that sends no `use` still opens and is logged as before.
+It works **offline**: the door opens on the Auth Code alone and the event reaches the backend later. A wrong `use`, a missing `purpose`, a bad `amount` or `attendant_id`, or personal use without both `attendant` and `attendant_id` gets `400` with `reason` (`bad_use`, `bad_purpose`, `bad_amount`, `bad_attendant_id`, `no_attendant`) and opens nothing. An older app that sends no `use` still opens and is logged as before.
 
 Five wrong Auth Codes in 60s from one phone block that phone for a minute.
 

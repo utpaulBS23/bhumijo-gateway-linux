@@ -2295,7 +2295,7 @@ class AttendantUseTests(unittest.TestCase):
         self.assertNotIn("purpose", ev)
 
     def test_personal_with_purpose(self):
-        for purpose in ("cleaning", "Bath", "toilet", "maintenance"):
+        for purpose in ("cleaning", "bath", "toilet", "maintenance"):
             self.assertEqual(self.open(use="personal", purpose=purpose, attendant="Rahim",
                                        attendant_id=615).status_code, 200, purpose)
         evs = self.up.of("door_event")
@@ -2307,7 +2307,8 @@ class AttendantUseTests(unittest.TestCase):
     def test_bad_requests_open_nothing(self):
         for body, why in (({"use": "friend"}, "bad_use"),
                           ({"use": "personal"}, "bad_purpose"),
-                          ({"use": "personal", "purpose": "party"}, "bad_purpose"),
+                          ({"use": "personal", "purpose": "  "}, "bad_purpose"),
+                          ({"use": "personal", "purpose": 3}, "bad_purpose"),
                           ({"use": "personal", "purpose": "bath"}, "no_attendant"),
                           ({"use": "personal", "purpose": "bath", "attendant": "  "}, "no_attendant"),
                           ({"use": "personal", "purpose": "bath", "attendant": "Rahim"}, "no_attendant"),
@@ -2356,9 +2357,12 @@ class AttendantUseTests(unittest.TestCase):
         ev = self.up.of("door_event")[0]
         self.assertEqual((ev["type"], ev["payment"], ev["amount"]), ("relay_failed", "cash", 20.0))
 
-    def test_purposes_configurable(self):
-        s = settings({"ATTENDANT_PURPOSES": "cleaning, Refill"})
-        self.assertEqual(s.attendant_purposes, ("cleaning", "refill"))
+    def test_purpose_is_any_text(self):
+        r = self.open(use="personal", purpose="Refill soap", attendant="Rahim", attendant_id=615)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(self.up.of("door_event")[0]["purpose"], "Refill soap")
+        self.open(use="personal", purpose="x" * 100, attendant="Rahim", attendant_id=615)
+        self.assertEqual(len(self.up.of("door_event")[1]["purpose"]), 64)
 
 
 class AuthCodeFallbackTests(unittest.TestCase):

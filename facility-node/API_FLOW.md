@@ -161,7 +161,7 @@ POST /facility/open
 |---|---|
 | `authCode` | The facility's Auth Code (also accepted as header `X-Auth-Code`) |
 | `door` | The gate: its device id (`BHU-002`) or `male` / `female` (or header `X-Door`) |
-| `use` | `customer`: a customer paid cash at the counter (`amount` optional, logged as a cash sale). No `amount` = the door's price; a different amount still opens but is flagged `price_mismatch: true`. `personal`: the attendant's own use, with `purpose` = `cleaning` / `bath` / `toilet` / `maintenance` |
+| `use` | `customer`: a customer paid cash at the counter (`amount` optional, logged as a cash sale). No `amount` = the door's price; a different amount still opens but is flagged `price_mismatch: true`. `personal`: the attendant's own use, with `purpose`: any text, e.g. `cleaning` (required, up to 64 characters) |
 | `attendant` | Who pressed it (name). **Required** for `personal`; optional for `customer` |
 | `attendant_id` | The attendant's backend user id (whole number). **Required** for `personal`; optional for `customer` |
 
