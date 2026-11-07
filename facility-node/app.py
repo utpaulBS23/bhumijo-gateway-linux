@@ -339,7 +339,7 @@ def create_app(settings, doors, store, uplink, cameras=(), limiter=None, odour=N
 
     @app.get("/facility/doors")
     def facility_doors():
-        """The Facility app's door buttons: id, admin-panel name and price, open.
+        """The Facility app's door buttons: id, admin-panel name and price, open, anomaly.
         Needs the Auth Code (header only: a query string would land in the log).
         Works offline from the last settings pull."""
         ip = request.remote_addr or "?"
@@ -349,7 +349,7 @@ def create_app(settings, doors, store, uplink, cameras=(), limiter=None, odour=N
             limiter.fail(ip)
             return jsonify(ok=False, result="denied"), STATUS["denied"]
         return jsonify(ok=True, doors=[
-            {"door": d.name, "door_id": d.door.door_id, **d.details(), "open": d.is_open}
+            {"door": d.name, "door_id": d.door.door_id, **d.details(), "open": d.is_open, "anomaly": d.anomaly}
             for d in doors])
 
     if settings.door_test_endpoints:

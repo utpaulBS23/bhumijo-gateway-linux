@@ -44,6 +44,7 @@ class DoorController:
         self._lock = threading.Lock()
         self._last_trigger = None   # (kind, ts) of the latest legit open
         self._opened_at = None      # ts door physically opened (reed), else None
+        self._anomaly = None        # "forced_open" | "propped_open" | None
         self._propped_alerts = 0    # propped_open alerts sent for current opening
         self._exit_held = False
         self._recent_scans = {}     # token -> (ts, result, why): scanner repeats, not new scans
@@ -280,6 +281,8 @@ class DoorController:
             legit = at_boot or (trig is not None and now - trig[1] <= self.classify_window)
             if legit:
                 self._last_trigger = None   # one trigger covers one opening
+            else:
+                self._anomaly = "forced_open"
         if not legit:
             log.warning("[%s] door opened with no trigger: forced_open", self.name)
             self._alert("forced_open", with_snapshot=True)
@@ -297,6 +300,7 @@ class DoorController:
             propped = self._propped_alerts > 0
             self._opened_at = None
             self._propped_alerts = 0
+            self._anomaly = None
         log.info("[%s] door closed after %d s", self.name, duration)
         self._door_event("door_closed", duration_s=duration)
         if propped:
@@ -314,6 +318,7 @@ class DoorController:
                 return
             repeat = self._propped_alerts > 0
             self._propped_alerts += 1
+            self._anomaly = "propped_open"
         log.warning("[%s] door open %d s: propped_open%s", self.name, elapsed,
                     " (repeat)" if repeat else "")
         # A picture every time: shows what happens while the door stays open
@@ -329,3 +334,9 @@ class DoorController:
     @property
     def is_open(self):
         return self._opened_at is not None
+
+    @property
+    def anomaly(self):
+        """Current anomaly state: "forced_open" | "propped_open" | None."""
+        with self._lock:
+            return self._anomaly

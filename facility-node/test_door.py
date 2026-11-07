@@ -505,7 +505,7 @@ class DoorIdTests(unittest.TestCase):
         r = c.get("/facility/doors", headers={"X-Auth-Code": "auth-code-123"})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json["doors"][0], {"door": "male", "door_id": "BHU-001",
-                                              "name": "Gents Toilet", "price": 10, "open": False})
+                                              "name": "Gents Toilet", "price": 10, "open": False, "anomaly": None})
         self.assertEqual(c.get("/facility/doors", headers={"X-Auth-Code": "wrong"}).status_code, 403)
         self.assertEqual(c.get("/facility/doors?authCode=auth-code-123").status_code, 403)
         self.assertEqual(c.get("/facility/doors",
