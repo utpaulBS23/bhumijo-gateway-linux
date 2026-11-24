@@ -32,25 +32,35 @@ def tcp_probe(host, port, timeout=2.0):
         return False
 
 
+FRAME_W, FRAME_H = 320, 180
+
+
 def _grab_gray_frame(rtsp, timeout=10):
-    """One tiny grayscale frame as raw bytes, or None."""
+    """One small grayscale frame as raw bytes, or None. 320x180 keeps the
+    camera's on-screen clock readable: it is what proves a quiet scene live."""
     cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-rtsp_transport", "tcp",
-           "-i", rtsp, "-frames:v", "1", "-vf", "scale=64:36,format=gray",
+           "-i", rtsp, "-frames:v", "1", "-vf", f"scale={FRAME_W}:{FRAME_H},format=gray",
            "-f", "rawvideo", "-"]
     try:
         res = subprocess.run(cmd, capture_output=True, timeout=timeout)
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         log.warning("frame grab failed: %s", hide_login(e))
         return None
-    if res.returncode != 0 or len(res.stdout) != 64 * 36:
+    if res.returncode != 0 or len(res.stdout) != FRAME_W * FRAME_H:
         return None
     return res.stdout
 
 
-def frames_differ(a, b, threshold=1.0):
-    """Mean absolute pixel difference above threshold -> feed is live."""
-    diff = sum(abs(x - y) for x, y in zip(a, b)) / len(a)
-    return diff > threshold
+def frames_differ(a, b, threshold=1.0, pixel_jump=12):
+    """True when the feed is live: the picture changed on average (motion,
+    light), or any pixel jumped by pixel_jump levels. An empty room changes
+    less than 1 on average, but the camera's ticking clock overlay still moves
+    some pixels by 20+; a hung stream repeats the frame, with only codec noise
+    of a few levels."""
+    diffs = [abs(x - y) for x, y in zip(a, b)]
+    if not diffs:
+        return False
+    return sum(diffs) / len(diffs) > threshold or max(diffs) >= pixel_jump
 
 
 def prune_snapshots(snapshot_dir, keep_days, now=None):

@@ -2581,6 +2581,12 @@ class MiscTests(unittest.TestCase):
         a = bytes([100] * 64)
         self.assertFalse(frames_differ(a, a))
         self.assertTrue(frames_differ(a, bytes([110] * 64)))
+        # quiet room: tiny average change, but the clock overlay ticked -> live
+        clock = bytes([100] * 60 + [130] * 4)
+        self.assertTrue(frames_differ(a, clock))
+        # hung stream: only codec noise of a few levels -> frozen
+        noise = bytes([101, 100] * 32)
+        self.assertFalse(frames_differ(a, noise))
 
     def test_parse_expiry(self):
         self.assertIsNone(parse_expiry(None))
