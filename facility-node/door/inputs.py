@@ -36,6 +36,9 @@ class ReedSwitch:
         if initially_open:
             # Booted with the door open: track it so propped alerts still fire
             door.door_opened(at_boot=True)
+        else:
+            # Booted with the door shut: resolve a propped_open left open by a restart
+            door.door_closed(at_boot=True)
 
     def close(self):
         self.button.close()

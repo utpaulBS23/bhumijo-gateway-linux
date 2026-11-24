@@ -7,7 +7,7 @@ Unlock decisions use only the local store, so the door opens offline. Every
 event is queued via the uplink; nothing here blocks on the network.
 
 Door-event types: entry | attendant | exit | denied | door_closed | relay_failed
-Alert subtypes:   forced_open | propped_open | propped_resolved
+Alert subtypes:   forced_open | forced_resolved | propped_open | propped_resolved
 
 Events and alerts name the door by the backend's device id (DOOR_<NAME>_ID,
 e.g. BHU-001; the Pi's door name until it is set); paid entries also carry the
@@ -17,6 +17,7 @@ door's price from the admin panel (door/info.py).
 import hmac
 import logging
 import threading
+import json
 import time
 import uuid
 
@@ -46,6 +47,7 @@ class DoorController:
         self._opened_at = None      # ts door physically opened (reed), else None
         self._anomaly = None        # "forced_open" | "propped_open" | None
         self._propped_alerts = 0    # propped_open alerts sent for current opening
+        self._forced = False        # this opening raised forced_open (resolve on close)
         self._exit_held = False
         self._recent_scans = {}     # token -> (ts, result, why): scanner repeats, not new scans
 
@@ -279,10 +281,25 @@ class DoorController:
             self._propped_alerts = 0
             trig = self._last_trigger
             legit = at_boot or (trig is not None and now - trig[1] <= self.classify_window)
+            if at_boot:
+                # Restarted while an alert was already open: carry on from the
+                # original opening so the close still sends the resolve.
+                p, f = self._pending("propped"), self._pending("forced")
+                if p is not None or f is not None:
+                    self._opened_at = min(x for x in (p, f) if x is not None)
+                if p is not None:
+                    self._propped_alerts = 1
+                    self._anomaly = "propped_open"
+                if f is not None:
+                    self._forced = True
+                    self._anomaly = self._anomaly or "forced_open"
             if legit:
                 self._last_trigger = None   # one trigger covers one opening
             else:
                 self._anomaly = "forced_open"
+                self._forced = True
+        if not legit:
+            self.store.set_cred(self._pending_key("forced"), json.dumps({"opened_at": now}))
         if not legit:
             log.warning("[%s] door opened with no trigger: forced_open", self.name)
             self._alert("forced_open", with_snapshot=True)
@@ -291,18 +308,45 @@ class DoorController:
         else:
             log.info("[%s] door opened (%s %.0f s before)", self.name, trig[0], now - trig[1])
 
-    def door_closed(self):
+    # forced_open and propped_open are remembered in the database until the door
+    # closes, so a restart (power cut, update, watchdog) can never leave either
+    # alert unresolved.
+    def _pending_key(self, kind):
+        return f"{kind}:{self.name}"
+
+    def _pending(self, kind):
+        """Unix time the door opened for the `kind` ("forced" | "propped") alert
+        still waiting for its resolve, or None."""
+        try:
+            return float(json.loads(self.store.get_cred(self._pending_key(kind)) or "null")["opened_at"])
+        except (TypeError, KeyError, ValueError):
+            return None
+
+    def door_closed(self, at_boot=False):
+        """at_boot: door found shut at startup; resolves a forced_open or
+        propped_open alert that was still open when the service last stopped."""
         now = self.clock()
         with self._lock:
             if self._opened_at is None:
-                return
-            duration = int(now - self._opened_at)
-            propped = self._propped_alerts > 0
+                p, f = self._pending("propped"), self._pending("forced")
+                if not at_boot or (p is None and f is None):
+                    return
+                duration = max(0, int(now - min(x for x in (p, f) if x is not None)))
+                propped, forced = p is not None, f is not None
+            else:
+                duration = int(now - self._opened_at)
+                propped, forced = self._propped_alerts > 0, self._forced
             self._opened_at = None
             self._propped_alerts = 0
+            self._forced = False
             self._anomaly = None
-        log.info("[%s] door closed after %d s", self.name, duration)
+        self.store.set_cred(self._pending_key("propped"), "")
+        self.store.set_cred(self._pending_key("forced"), "")
+        log.info("[%s] door closed after %d s%s", self.name, duration,
+                 " (found shut at start)" if at_boot else "")
         self._door_event("door_closed", duration_s=duration)
+        if forced:
+            self._alert("forced_resolved", duration_s=duration)
         if propped:
             self._alert("propped_resolved", duration_s=duration)
 
@@ -321,6 +365,9 @@ class DoorController:
             self._anomaly = "propped_open"
         log.warning("[%s] door open %d s: propped_open%s", self.name, elapsed,
                     " (repeat)" if repeat else "")
+        if not repeat:
+            self.store.set_cred(self._pending_key("propped"), json.dumps(
+                {"opened_at": now - elapsed}))
         # A picture every time: shows what happens while the door stays open
         self._alert("propped_open", with_snapshot=True,
                     duration_s=int(elapsed), repeat=repeat)
