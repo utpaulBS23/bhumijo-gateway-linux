@@ -82,7 +82,7 @@ Inside the Pi, a single Python service (`facility-node`, run by systemd). Each f
 | 1 Door | **Facility app unlock** | Attendant phone sends the per-facility **Auth Code** and the door name |
 | 1 Door | **Pi-made QR codes** | `facility qr create`: test, staff and commissioning codes that expire after 24 h by default |
 | 1 Door | **Exit tracking** | Exit button opens the door in hardware; a second contact into the KC868 lets the Pi log an `exit` |
-| 1 Door | **Door anomalies** | Reed switch per door: `forced_open` (opened with no trigger), `propped_open` (repeats while open), `propped_resolved` |
+| 1 Door | **Door anomalies** | Reed switch per door: `forced_open` (opened with no trigger), `forced_resolved`, `propped_open` (repeats while open), `propped_resolved` |
 | 2 Camera | **Camera health** | Reachability probe, frozen-feed detection; set up with `facility camera` |
 | 2 Camera | **Snapshots** | JPEG on door anomalies from that door's camera (several cameras supported), optional upload |
 | 3 Odour | **Air quality** | ENS160 (TVOC, eCO2, AQI) + AHT20 (temperature, humidity) every 60 s, on the Pi's I2C or an ESP32-S3 WiFi board (`facility sensor`) |
@@ -194,7 +194,8 @@ Five failures from one phone in 60 s → `429` for a minute.
 | Valid QR / app unlock or exit press on **this door** within `CLASSIFY_WINDOW` (15 s) | Normal opening (already logged as entry / attendant / exit) |
 | Opening with no trigger | Alert `forced_open` + snapshot |
 | Open ≥ `PROPPED_THRESHOLD` (300 s) | Alert `propped_open` (`repeat:false`), then every `PROPPED_REPEAT` (180 s) with `repeat:true`; each with a snapshot from the door's camera |
-| Door closes | Door-event `door_closed` + `duration_s`; `propped_resolved` if it was propped |
+| Door closes | Door-event `door_closed` + `duration_s`; `forced_resolved` if it was forced open, `propped_resolved` if it was propped |
+| Service restarts while a door is propped | The open `forced_open` / `propped_open` is kept in the local database (`creds`, keys `forced:<door>` / `propped:<door>`). Door found shut at start: `door_closed` + `forced_resolved` / `propped_resolved` are sent once, with the real `duration_s`. Door still open at start: the alert carries on from the original opening and the close resolves it |
 
 Each door keeps its own state. A male QR scan doesn't excuse a female door opening.
 
@@ -259,6 +260,7 @@ Port 5454, **facility LAN only**: the firewall blocks everything else, and there
 | `POST /qr` | QR scanner | `{token}`, form field, or plain-text body | `200 opened` · `403 denied` / `unknown_scanner` · `502 relay_error` |
 | `POST /api/device/code` | Scanner with that fixed path | same as `/qr` | same as `/qr` |
 | `POST /api/device/DoorHeart` | Scanner heartbeat (every 30 s) | anything | `200 {ok: true}`; opens nothing. `/health` → `doors.<door>.scanner_heartbeat` shows each scanner's last beat and `alive` (a beat in the last 2 min) |
+| `POST /api/device/DoorEvent` | Scanner event (every ~20 s) | anything | `200 {ok: true}`; opens nothing. Meaning not yet known: only acknowledged. Both this and `DoorHeart` also answer with a capital D (`/api/Device/...`), which is what the scanner firmware sends |
 | `GET\|POST /qrscanner` | Legacy-format scanner | `?cardid=…` | always 200: `{status, access_granted}` |
 | `POST /rakindaqrscanner` | Rakinda scanner | `{SCode}` | `{ResultCode:"1"\|"0", Msg, Audio}` |
 | `POST /facility/open` | Facility app | `{authCode, door}` or headers `X-Auth-Code` + `X-Door`; `use`, `purpose`, `amount`, `attendant`, `attendant_id` | `200` · `403` · `400` (`reason`) · `429` · `502` |
@@ -342,6 +344,7 @@ Values are `null` when a sensor is warming up, failed, or not fitted. `tvoc_scor
 | `subtype` | Fields | Backend handling |
 |---|---|---|
 | `forced_open` | `door`, `snapshot?`, `camera?` | New alarm |
+| `forced_resolved` | `door`, `duration_s` | All-clear for `forced_open`: the door closed |
 | `propped_open` | `door`, `duration_s`, `repeat`, `snapshot?`, `camera?` (every one, repeats too) | `repeat:false` = new alarm, `true` = update |
 | `propped_resolved` | `door`, `duration_s` | All-clear |
 | `odour_high` | `duration_s`, `repeat`, `metrics` (e.g. `["tvoc_score"]`), `readings` (no `door`) | `repeat:false` = new alarm, `true` = update |

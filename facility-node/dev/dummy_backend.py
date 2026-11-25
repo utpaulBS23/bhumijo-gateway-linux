@@ -70,7 +70,7 @@ REQUIRED = {
     "alert": {"id", "facility", "type", "subtype", "ts"},
 }
 DOOR_TYPES = {"entry", "attendant", "exit", "denied", "door_closed", "relay_failed"}
-ALERT_SUBTYPES = {"forced_open", "propped_open", "propped_resolved",
+ALERT_SUBTYPES = {"forced_open", "forced_resolved", "propped_open", "propped_resolved",
                   "odour_high", "odour_resolved", "device_mismatch"}
 NODE = "/api/gateway/facility-node"
 

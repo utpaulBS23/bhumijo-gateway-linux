@@ -5,6 +5,8 @@ LAN only. Never expose port 5454 to the internet.
     POST /qr              {token}            QR scanner; door chosen by scanner IP
     POST /api/device/code {token}            same as /qr, for scanners with that fixed path
     POST /api/device/DoorHeart               scanner heartbeat (every 30 s): recorded, opens nothing
+    POST /api/device/DoorEvent               scanner event: acknowledged, opens nothing
+                                             (both also with a capital D: /api/Device/...)
     GET|POST /qrscanner   ?cardid=..         same, legacy scanner format + response
     POST /rakindaqrscanner {SCode}           same, Rakinda format + response
     POST /facility/open   {authCode, door}   Facility app; door = section name or door id
@@ -287,7 +289,10 @@ def create_app(settings, doors, store, uplink, cameras=(), limiter=None, odour=N
     # existing scanners already understand. Drop once all scanners use /qr.
     heartbeats = {}   # scanner IP -> last heartbeat (unix s)
 
+    # The scanner firmware spells it /api/Device/... (capital D); Flask paths are
+    # case-sensitive, so both spellings are registered.
     @app.post("/api/device/DoorHeart")
+    @app.post("/api/Device/DoorHeart")
     def door_heart():
         """The scanners' "I'm alive" call. Only remembered, for /health: a scanner
         that stops beating is offline. Anyone on the LAN can send one, so it
@@ -297,6 +302,27 @@ def create_app(settings, doors, store, uplink, cameras=(), limiter=None, odour=N
             heartbeats[ip] = time.time()
             if guard is not None:
                 guard.heard(ip)     # counts the scanner as reachable
+        return jsonify(ok=True), 200
+
+    door_event_seen = [0]
+
+    @app.post("/api/device/DoorEvent")
+    @app.post("/api/Device/DoorEvent")
+    def door_event():
+        """The scanners' event call (every ~20 s). Meaning not yet known, so it is
+        acknowledged and nothing else: it counts as a sign of life, never opens
+        or changes a door. The first few are logged by shape only (JSON keys or
+        size, never values, as a body may hold a QR token), to learn the format."""
+        ip = request.remote_addr or "?"
+        if ip in by_scanner or any_scanner is not None:
+            if guard is not None:
+                guard.heard(ip)
+        if door_event_seen[0] < 5:
+            door_event_seen[0] += 1
+            js = request.get_json(silent=True)
+            shape = ("json keys " + ",".join(sorted(map(str, js)))
+                     if isinstance(js, dict) else f"{len(request.get_data())} bytes")
+            log.info("scanner %s DoorEvent: %s", ip, shape)
         return jsonify(ok=True), 200
 
     def scanner_state(d):

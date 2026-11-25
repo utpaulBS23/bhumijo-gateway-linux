@@ -242,6 +242,101 @@ class DoorTests(unittest.TestCase):
                          {"facility": "facility-001", "door": "main", "type": "door_closed",
                           "ts": up.of("door_event")[-1]["ts"], "duration_s": 680})
 
+    def _restarted(self, door, relay, up, clock, store):
+        """A fresh controller on the same database: the service was restarted."""
+        return DoorController(door.s, door.door, store, relay, up,
+                              snapshot=lambda: {"snapshot": "snap.jpg", "camera": "main"},
+                              clock=clock, spawn=lambda fn: fn())
+
+    def test_restart_while_propped_then_shut_still_resolves(self):
+        door, relay, up, clock, store = make_door(propped_threshold=300, propped_repeat=180)
+        door.qr("good"); door.door_opened()
+        clock.advance(300); door.tick()
+        self.assertEqual([a["subtype"] for a in up.of("alert")], ["propped_open"])
+        # Service restarts and finds the door shut: the resolve must still go out.
+        clock.advance(100)
+        fresh = self._restarted(door, relay, up, clock, store)
+        fresh.door_closed(at_boot=True)
+        alerts = up.of("alert")
+        self.assertEqual([a["subtype"] for a in alerts], ["propped_open", "propped_resolved"])
+        self.assertEqual(alerts[-1]["duration_s"], 400)
+        self.assertEqual(up.of("door_event")[-1]["type"], "door_closed")
+        # Sent once only: a second restart with the door shut sends nothing more.
+        again = self._restarted(door, relay, up, clock, store)
+        again.door_closed(at_boot=True)
+        self.assertEqual(len(up.of("alert")), 2)
+
+    def test_restart_while_propped_and_still_open_resolves_on_close(self):
+        door, relay, up, clock, store = make_door(propped_threshold=300, propped_repeat=180)
+        door.qr("good"); door.door_opened()
+        clock.advance(300); door.tick()
+        clock.advance(50)
+        fresh = self._restarted(door, relay, up, clock, store)
+        fresh.door_opened(at_boot=True)
+        self.assertEqual(fresh.anomaly, "propped_open")
+        clock.advance(70); fresh.door_closed()
+        alerts = up.of("alert")
+        self.assertEqual(alerts[-1]["subtype"], "propped_resolved")
+        self.assertEqual(alerts[-1]["duration_s"], 420)
+
+    def test_boot_shut_with_nothing_pending_sends_nothing(self):
+        door, relay, up, clock, store = make_door()
+        door.door_closed(at_boot=True)
+        self.assertEqual((up.of("alert"), up.of("door_event")), ([], []))
+
+    def test_short_open_without_propped_leaves_nothing_pending(self):
+        door, relay, up, clock, store = make_door(propped_threshold=300)
+        door.qr("good"); door.door_opened(); clock.advance(20); door.door_closed()
+        self._restarted(door, relay, up, clock, store).door_closed(at_boot=True)
+        self.assertEqual(up.of("alert"), [])
+
+    def test_forced_open_resolves_when_door_closes(self):
+        door, relay, up, clock, store = make_door()
+        door.door_opened()                       # no trigger
+        clock.advance(40); door.door_closed()
+        alerts = up.of("alert")
+        self.assertEqual([a["subtype"] for a in alerts], ["forced_open", "forced_resolved"])
+        self.assertEqual(alerts[-1]["duration_s"], 40)
+        self.assertNotIn("snapshot", alerts[-1])
+
+    def test_legit_open_sends_no_forced_resolved(self):
+        door, relay, up, clock, store = make_door()
+        door.qr("good"); door.door_opened(); clock.advance(10); door.door_closed()
+        self.assertEqual(up.of("alert"), [])
+
+    def test_forced_then_propped_resolve_both_in_order(self):
+        door, relay, up, clock, store = make_door(propped_threshold=300, propped_repeat=180)
+        door.door_opened()
+        clock.advance(300); door.tick()
+        clock.advance(20); door.door_closed()
+        self.assertEqual([a["subtype"] for a in up.of("alert")],
+                         ["forced_open", "propped_open", "forced_resolved", "propped_resolved"])
+
+    def test_restart_while_forced_then_shut_still_resolves(self):
+        door, relay, up, clock, store = make_door()
+        door.door_opened()
+        clock.advance(90)
+        fresh = self._restarted(door, relay, up, clock, store)
+        fresh.door_closed(at_boot=True)
+        alerts = up.of("alert")
+        self.assertEqual([a["subtype"] for a in alerts], ["forced_open", "forced_resolved"])
+        self.assertEqual(alerts[-1]["duration_s"], 90)
+        again = self._restarted(door, relay, up, clock, store)
+        again.door_closed(at_boot=True)
+        self.assertEqual(len(up.of("alert")), 2)
+
+    def test_restart_while_forced_and_still_open_resolves_on_close(self):
+        door, relay, up, clock, store = make_door()
+        door.door_opened()
+        clock.advance(30)
+        fresh = self._restarted(door, relay, up, clock, store)
+        fresh.door_opened(at_boot=True)
+        self.assertEqual(fresh.anomaly, "forced_open")
+        clock.advance(30); fresh.door_closed()
+        alerts = up.of("alert")
+        self.assertEqual([a["subtype"] for a in alerts], ["forced_open", "forced_resolved"])
+        self.assertEqual(alerts[-1]["duration_s"], 60)
+
     def test_short_open_sends_no_propped_alerts(self):
         door, _, up, clock, _ = make_door()
         door.qr("good"); door.door_opened(); clock.advance(30); door.tick(); door.door_closed()
@@ -982,6 +1077,19 @@ class DoorHeartTests(unittest.TestCase):
         h = c.get("/health").json["doors"]
         self.assertTrue(h["male"]["scanner_heartbeat"]["192.168.10.101"]["alive"])
         self.assertIsNone(h["female"]["scanner_heartbeat"]["192.168.10.102"]["alive"])
+        self.assertEqual((relay.fired, up.items), ([], []))
+
+    def test_capital_d_paths_and_door_event_answered_not_opening(self):
+        # The real scanner firmware posts /api/Device/... (capital D).
+        doors, relay, up, _, store = make_doors(TWO_DOORS)
+        s = doors[0].s
+        c = create_app(s, doors, store, Uplink(s, store, session=FakeSession())).test_client()
+        me = {"REMOTE_ADDR": "192.168.10.101"}
+        for path in ("/api/Device/DoorHeart", "/api/Device/DoorEvent", "/api/device/DoorEvent"):
+            r = c.post(path, json={"x": 1}, environ_base=me)
+            self.assertEqual((r.status_code, r.json), (200, {"ok": True}), path)
+        h = c.get("/health").json["doors"]["male"]["scanner_heartbeat"]
+        self.assertTrue(h["192.168.10.101"]["alive"])
         self.assertEqual((relay.fired, up.items), ([], []))
 
 
@@ -2473,6 +2581,12 @@ class MiscTests(unittest.TestCase):
         a = bytes([100] * 64)
         self.assertFalse(frames_differ(a, a))
         self.assertTrue(frames_differ(a, bytes([110] * 64)))
+        # quiet room: tiny average change, but the clock overlay ticked -> live
+        clock = bytes([100] * 60 + [130] * 4)
+        self.assertTrue(frames_differ(a, clock))
+        # hung stream: only codec noise of a few levels -> frozen
+        noise = bytes([101, 100] * 32)
+        self.assertFalse(frames_differ(a, noise))
 
     def test_parse_expiry(self):
         self.assertIsNone(parse_expiry(None))
